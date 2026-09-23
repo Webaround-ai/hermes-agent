@@ -128,7 +128,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           IOLLO_MINISIGN_SECRET_KEY: ${{ secrets.IOLLO_MINISIGN_SECRET_KEY }}
           IOLLO_MINISIGN_PASSWORD: ${{ secrets.IOLLO_MINISIGN_PASSWORD }}
-        run: scripts/iollo/sign-release.sh "$TAG" dist/iollo --require-both
+        run: scripts/iollo/sign-release.sh "$TAG" dist/iollo
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -148,7 +148,7 @@ jobs:
               "$(jq -r .upstream_version dist/iollo/release.json)" \
               "$(jq -r .upstream_commit dist/iollo/release.json)"
             printf 'Box image (linux/amd64): %s.\n\n' "$(jq -r .image dist/iollo/release.json)"
-            printf 'Mac runtimes: arm64 and x86_64. Download release.json and the matching archive/signatures together. Verify using scripts/iollo/verify-bundle.sh and the public key embedded in the Mac app.\n'
+            printf 'Mac runtimes: the architectures listed in release.json (arm64 always; x86_64 when its best-effort build succeeded). Download release.json and the matching archive/signatures together. Verify using scripts/iollo/verify-bundle.sh and the public key embedded in the Mac app.\n'
           } > "$RUNNER_TEMP/iollo-release-notes.md"
           prerelease=()
           if [[ "$TAG" =~ -rc[0-9]+$ ]]; then

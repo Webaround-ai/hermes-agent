@@ -1,0 +1,183 @@
+name: Iollo release
+
+on:
+  push:
+    tags: ['iollo-*']
+  pull_request:
+    branches: [iollo]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iollo-release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  box:
+    if: github.event_name == 'push' && github.repository == 'Webaround-ai/hermes-agent'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate tag and upstream ancestry
+        id: metadata
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/iollo/release.py check-tag "$TAG"
+          echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build unchanged upstream Dockerfile (Fly boxes are amd64)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/webaround-ai/hermes-agent:${{ github.ref_name }}
+            ghcr.io/webaround-ai/hermes-agent:${{ github.ref_name }}-${{ steps.metadata.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/Webaround-ai/hermes-agent
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=iollo-box
+          cache-to: type=gha,scope=iollo-box,mode=max
+
+  mac:
+    if: github.event_name == 'push' && github.repository == 'Webaround-ai/hermes-agent'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          # Prefer the paid Intel runner; the owner may select macos-15-intel.
+          - arch: x86_64
+            runner: ${{ vars.IOLLO_MACOS_X86_RUNNER || 'macos-15-large' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install packaging tools
+        run: brew install zstd minisign
+      - name: Build and smoke boot relocated runtime
+        env:
+          TAG: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
+        run: scripts/iollo/build-mac-bundle.sh "$TAG" "$ARCH" dist/iollo
+      - name: Sign if both secrets exist, then verify on the target architecture
+        env:
+          TAG: ${{ github.ref_name }}
+          ARCH: ${{ matrix.arch }}
+          IOLLO_MINISIGN_SECRET_KEY: ${{ secrets.IOLLO_MINISIGN_SECRET_KEY }}
+          IOLLO_MINISIGN_PASSWORD: ${{ secrets.IOLLO_MINISIGN_PASSWORD }}
+        run: |
+          scripts/iollo/sign-release.sh "$TAG" dist/iollo
+          archive="dist/iollo/hermes-runtime-$TAG-macos-$ARCH.tar.zst"
+          if [[ -f dist/iollo/iollo.minisign.pub ]]; then
+            scripts/iollo/verify-bundle.sh "$archive" dist/iollo/iollo.minisign.pub
+          else
+            scripts/iollo/verify-bundle.sh "$archive"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runtime-${{ matrix.arch }}
+          path: dist/iollo/*.tar.zst*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    if: github.event_name == 'push' && github.repository == 'Webaround-ai/hermes-agent'
+    needs: [box, mac]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: runtime-*
+          merge-multiple: true
+          path: dist/iollo
+      - name: Install signer
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Assemble release metadata and sign
+        env:
+          TAG: ${{ github.ref_name }}
+          IOLLO_MINISIGN_SECRET_KEY: ${{ secrets.IOLLO_MINISIGN_SECRET_KEY }}
+          IOLLO_MINISIGN_PASSWORD: ${{ secrets.IOLLO_MINISIGN_PASSWORD }}
+        run: scripts/iollo/sign-release.sh "$TAG" dist/iollo --require-both
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          title="Iollo $TAG"
+          if jq -e '.assets | all(.signature_name != null)' dist/iollo/release.json >/dev/null; then
+            signing='Archives, release.json and SHA256SUMS are signed with the Iollo minisign key.'
+          else
+            title="$title — UNSIGNED"
+            signing='UNSIGNED: no publisher signature. Both IOLLO_MINISIGN secrets must be configured for signed releases.'
+          fi
+          {
+            printf '%s\n\n' "$signing"
+            printf 'Upstream: %s (%s).\n\n' \
+              "$(jq -r .upstream_version dist/iollo/release.json)" \
+              "$(jq -r .upstream_commit dist/iollo/release.json)"
+            printf 'Box image (linux/amd64): %s.\n\n' "$(jq -r .image dist/iollo/release.json)"
+            printf 'Mac runtimes: arm64 and x86_64. Download release.json and the matching archive/signatures together. Verify using scripts/iollo/verify-bundle.sh and the public key embedded in the Mac app.\n'
+          } > "$RUNNER_TEMP/iollo-release-notes.md"
+          prerelease=()
+          if [[ "$TAG" =~ -rc[0-9]+$ ]]; then
+            prerelease+=(--prerelease)
+          fi
+          # Stage a draft so users never discover a release with a partial asset set.
+          gh release create "$TAG" --verify-tag --draft "${prerelease[@]}" \
+            --title "$title" --notes-file "$RUNNER_TEMP/iollo-release-notes.md" dist/iollo/*
+          gh release edit "$TAG" --draft=false
+
+  dry-run:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install packaging tools
+        run: brew install zstd
+      - name: Build arm64 runtime without publishing or signing
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          upstream=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
+          scripts/iollo/build-mac-bundle.sh "iollo-${upstream#v}-rc$RUN_NUMBER" arm64 dist/iollo
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: iollo-pr-arm64
+          path: dist/iollo/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

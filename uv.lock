@@ -12,104 +12,106 @@ exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for 
 exclude-newer-span = "P14D"
 
 [options.exclude-newer-package]
-agent-client-protocol = false
-ai-edge-litert = false
-aiohttp = false
-aiohttp-socks = false
-aiosqlite = false
-alibabacloud-dingtalk = false
-anthropic = false
-asyncpg = false
-azure-identity = false
-boto3 = false
-brotlicffi = false
-certifi = false
-concurrent-log-handler = false
-croniter = false
-cryptography = false
-daytona = false
-debugpy = false
-defusedxml = false
-dingtalk-stream = false
-discord-py = false
-edge-tts = false
 elevenlabs = false
-exa-py = false
-fal-client = false
-fastapi = false
-faster-whisper = false
-fire = false
-firecrawl-anydoc = false
-firecrawl-py = false
-google-api-python-client = false
+setuptools = false
+modal = false
+pyyaml = false
+maturin = false
+numpy = false
+pvporcupine = false
 google-auth = false
-google-auth-httplib2 = false
-google-auth-oauthlib = false
+aiohttp = false
+starlette = false
+mistralai = false
+firecrawl-py = false
+parallel-web = false
+markdown = false
+opentelemetry-sdk = false
+prompt-toolkit = false
+fastapi = false
+anthropic = false
+pathspec = false
+openwakeword = false
+defusedxml = false
+ruff = false
+exa-py = false
+mcp = false
+python-olm = false
+wheel = false
+sqlite-vec = false
+websockets = false
+pytest = false
+pillow = false
+setuptools-rust = false
+tenacity = false
+pyjwt = false
+slack-bolt = false
+fal-client = false
+asyncpg = false
+boto3 = false
+ruamel-yaml = false
+sherpa-onnx = false
+huggingface-hub = false
+pytest-asyncio = false
 google-cloud-pubsub = false
-h2 = false
+slack-sdk = false
+discord-py = false
 honcho-ai = false
+faster-whisper = false
+certifi = false
+debugpy = false
+packaging = false
+rich = false
+supermemory = false
+unpaddedbase64 = false
+h2 = false
+youtube-transcript-api = false
+edge-tts = false
+microsoft-teams-apps = false
+aiohttp-socks = false
+ai-edge-litert = false
+onnxruntime = false
+croniter = false
+opentelemetry-exporter-otlp-proto-http = false
+azure-identity = false
+lark-oapi = false
+sentencepiece = false
+firecrawl-anydoc = false
+google-api-python-client = false
+brotlicffi = false
+mem0ai = false
+qrcode = false
+vercel = false
+aiosqlite = false
+tzdata = false
+python-dotenv = false
+daytona = false
+uvicorn = false
+nemo-relay = false
+requests = false
 httplib2 = false
 httpx = false
-httpx2 = false
-huggingface-hub = false
-jinja2 = false
-lark-oapi = false
-markdown = false
-maturin = false
-mautrix = false
-mcp = false
-mem0ai = false
-microsoft-teams-apps = false
-mistralai = false
-modal = false
-nemo-relay = false
-numpy = false
-onnxruntime = false
-openai = false
-opentelemetry-exporter-otlp-proto-http = false
-opentelemetry-sdk = false
-openwakeword = false
-packaging = false
-parallel-web = false
-pathspec = false
-pillow = false
-prompt-toolkit = false
-psutil = false
-pvporcupine = false
 pyasn1 = false
-pydantic = false
-pyjwt = false
-pytest = false
-pytest-asyncio = false
-python-dotenv = false
-python-multipart = false
-python-olm = false
-python-telegram-bot = false
-pyyaml = false
-qrcode = false
-requests = false
-rich = false
-ruamel-yaml = false
-ruff = false
-sentencepiece = false
-setuptools = false
-setuptools-rust = false
-sherpa-onnx = false
-slack-bolt = false
-slack-sdk = false
 snowballstemmer = false
-sounddevice = false
-starlette = false
-supermemory = false
-tenacity = false
+concurrent-log-handler = false
+cryptography = false
+pydantic = false
+agent-client-protocol = false
+fire = false
+httpx2 = false
+google-auth-oauthlib = false
+python-multipart = false
 ty = false
-tzdata = false
-unpaddedbase64 = false
-uvicorn = false
-vercel = false
-websockets = false
-wheel = false
-youtube-transcript-api = false
+openai = false
+google-auth-httplib2 = false
+mautrix = false
+python-telegram-bot = false
+psutil = false
+tokenizers = false
+jinja2 = false
+sounddevice = false
+alibabacloud-dingtalk = false
+dingtalk-stream = false
 
 [manifest]
 overrides = [
@@ -1786,9 +1788,12 @@ all = [
     { name = "httplib2" },
     { name = "httpx2" },
     { name = "mcp" },
+    { name = "onnxruntime", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
     { name = "pyasn1" },
     { name = "python-multipart" },
+    { name = "sqlite-vec" },
     { name = "starlette" },
+    { name = "tokenizers" },
     { name = "uvicorn" },
     { name = "uvloop", marker = "platform_python_implementation != 'PyPy' and sys_platform != 'android' and sys_platform != 'cygwin' and sys_platform != 'win32'" },
     { name = "youtube-transcript-api" },
@@ -1864,6 +1869,11 @@ homeassistant = [
 ]
 honcho = [
     { name = "honcho-ai" },
+]
+iollo-memory = [
+    { name = "onnxruntime", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "sqlite-vec" },
+    { name = "tokenizers" },
 ]
 matrix = [
     { name = "aiohttp" },
@@ -2039,6 +2049,7 @@ requires-dist = [
     { name = "hermes-agent", extras = ["homeassistant"], marker = "extra == 'all'" },
     { name = "hermes-agent", extras = ["homeassistant"], marker = "extra == 'termux-all'" },
     { name = "hermes-agent", extras = ["honcho"], marker = "extra == 'termux'" },
+    { name = "hermes-agent", extras = ["iollo-memory"], marker = "extra == 'all'" },
     { name = "hermes-agent", extras = ["mcp"], marker = "extra == 'all'" },
     { name = "hermes-agent", extras = ["mcp"], marker = "extra == 'termux'" },
     { name = "hermes-agent", extras = ["pty"], marker = "extra == 'all'" },
@@ -2072,6 +2083,7 @@ requires-dist = [
     { name = "nemo-relay", marker = "(platform_machine == 'aarch64' and 'android' not in platform_release and sys_platform == 'linux') or (platform_machine == 'x86_64' and 'android' not in platform_release and sys_platform == 'linux') or (platform_machine == 'arm64' and sys_platform == 'darwin') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'ARM64' and sys_platform == 'win32')", specifier = ">=0.8.3,<0.9" },
     { name = "numpy", marker = "extra == 'voice'", specifier = "==2.4.3" },
     { name = "numpy", marker = "extra == 'wake'", specifier = "==2.4.3" },
+    { name = "onnxruntime", marker = "(platform_machine != 'x86_64' and extra == 'iollo-memory') or (sys_platform != 'darwin' and extra == 'iollo-memory')", specifier = "==1.27.0" },
     { name = "onnxruntime", marker = "extra == 'wake'", specifier = "==1.27.0" },
     { name = "openai", specifier = "==2.24.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otlp'", specifier = "==1.39.1" },
@@ -2117,12 +2129,14 @@ requires-dist = [
     { name = "snowballstemmer", specifier = "==3.1.1" },
     { name = "sounddevice", marker = "extra == 'voice'", specifier = "==0.5.5" },
     { name = "sounddevice", marker = "extra == 'wake'", specifier = "==0.5.5" },
+    { name = "sqlite-vec", marker = "extra == 'iollo-memory'", specifier = "==0.1.9" },
     { name = "starlette", marker = "extra == 'computer-use'", specifier = "==1.3.1" },
     { name = "starlette", marker = "extra == 'dev'", specifier = "==1.3.1" },
     { name = "starlette", marker = "extra == 'mcp'", specifier = "==1.3.1" },
     { name = "starlette", marker = "extra == 'web'", specifier = "==1.3.1" },
     { name = "supermemory", marker = "extra == 'supermemory'", specifier = "==3.50.0" },
     { name = "tenacity", specifier = "==9.1.4" },
+    { name = "tokenizers", marker = "extra == 'iollo-memory'", specifier = "==0.22.2" },
     { name = "ty", marker = "extra == 'dev'", specifier = "==0.0.21" },
     { name = "tzdata", marker = "sys_platform == 'win32'", specifier = "==2025.3" },
     { name = "urllib3", specifier = ">=2.7.0,<3" },
@@ -2134,7 +2148,7 @@ requires-dist = [
     { name = "websockets", specifier = "==15.0.1" },
     { name = "youtube-transcript-api", marker = "extra == 'youtube'", specifier = "==1.2.4" },
 ]
-provides-extras = ["uvloop", "anthropic", "exa", "firecrawl", "parallel-web", "fal", "edge-tts", "modal", "daytona", "vercel", "dev", "messaging", "cron", "slack", "matrix", "wecom", "tts-premium", "voice", "wake", "honcho", "supermemory", "mem0", "vision", "pty", "mcp", "nemo-relay", "homeassistant", "sms", "teams", "computer-use", "acp", "mistral", "otlp", "bedrock", "vertex", "azure-identity", "termux", "termux-all", "dingtalk", "feishu", "google", "google-chat", "youtube", "web", "all"]
+provides-extras = ["uvloop", "anthropic", "exa", "firecrawl", "parallel-web", "fal", "edge-tts", "modal", "daytona", "vercel", "dev", "messaging", "cron", "slack", "matrix", "wecom", "tts-premium", "voice", "wake", "honcho", "iollo-memory", "supermemory", "mem0", "vision", "pty", "mcp", "nemo-relay", "homeassistant", "sms", "teams", "computer-use", "acp", "mistral", "otlp", "bedrock", "vertex", "azure-identity", "termux", "termux-all", "dingtalk", "feishu", "google", "google-chat", "youtube", "web", "all"]
 
 [[package]]
 name = "hf-xet"
@@ -4261,7 +4275,7 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "python_full_version < '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -4316,7 +4330,7 @@ resolution-markers = [
     "python_full_version == '3.12.*'",
 ]
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/25/c2700dfaf6442b4effaa91af24ebce5dc9d31bb4a69706313aae70d72cd0/scipy-1.18.0.tar.gz", hash = "sha256:67b2ad2ad54c72ca6d04975a9b2df8c3638c34ddd5b28738e94fc2b57929d378", size = 30774447, upload-time = "2026-06-19T15:01:43.456Z" }
 wheels = [
@@ -4533,6 +4547,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/94/df/de669c7054cd47c4439ac34b1b2ee8b804a794791fbb10720e997a2c87c7/sqlalchemy-2.0.51-cp313-cp313-win32.whl", hash = "sha256:b93ab07b5292dbe7e6b8da89475275e7042744283921344b56105f3eeb0f828b", size = 2117721, upload-time = "2026-06-15T16:23:12.36Z" },
     { url = "https://files.pythonhosted.org/packages/d0/8a/403c51d064196bae20a0bc2476577f83a3f8dd299719a97417086b7f2ec5/sqlalchemy-2.0.51-cp313-cp313-win_amd64.whl", hash = "sha256:0f053118c30e53161857a953e4de667d90e274980dccbe5dd3829bbbeece72a5", size = 2143615, upload-time = "2026-06-15T16:23:13.906Z" },
     { url = "https://files.pythonhosted.org/packages/e2/22/dbf013a12ec759e54a34a119e9e217435b3f71b2dd5c61a7ade0a25dae87/sqlalchemy-2.0.51-py3-none-any.whl", hash = "sha256:bb024d8b621d0be75f4f44ecc7c950450026e76d66dc8f791bb5331d7fed59d5", size = 1944334, upload-time = "2026-06-15T16:09:22.418Z" },
+]
+
+[[package]]
+name = "sqlite-vec"
+version = "0.1.9"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/85/9fad0045d8e7c8df3e0fa5a56c630e8e15ad6e5ca2e6106fceb666aa6638/sqlite_vec-0.1.9-py3-none-macosx_10_6_x86_64.whl", hash = "sha256:1b62a7f0a060d9475575d4e599bbf94a13d85af896bc1ce86ee80d1b5b48e5fb", size = 131171, upload-time = "2026-03-31T08:02:31.717Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/3d/3677e0cd2f92e5ebc43cd29fbf565b75582bff1ccfa0b8327c7508e1084f/sqlite_vec-0.1.9-py3-none-macosx_11_0_arm64.whl", hash = "sha256:1d52e30513bae4cc9778ddbf6145610434081be4c3afe57cd877893bad9f6b6c", size = 165434, upload-time = "2026-03-31T08:02:32.712Z" },
+    { url = "https://files.pythonhosted.org/packages/00/d4/f2b936d3bdc38eadcbd2a87875815db36430fab0363182ba5d12cd8e0b51/sqlite_vec-0.1.9-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4e921e592f24a5f9a18f590b6ddd530eb637e2d474e3b1972f9bbeb773aa3cb9", size = 160076, upload-time = "2026-03-31T08:02:33.796Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/ad/6afd073b0f817b3e03f9e37ad626ae341805891f23c74b5292818f49ac63/sqlite_vec-0.1.9-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux1_x86_64.whl", hash = "sha256:1515727990b49e79bcaf75fdee2ffc7d461f8b66905013231251f1c8938e7786", size = 163388, upload-time = "2026-03-31T08:02:34.888Z" },
+    { url = "https://files.pythonhosted.org/packages/42/89/81b2907cda14e566b9bf215e2ad82fc9b349edf07d2010756ffdb902f328/sqlite_vec-0.1.9-py3-none-win_amd64.whl", hash = "sha256:4a28dc12fa4b53d7b1dced22da2488fade444e96b5d16fd2d698cd670675cf32", size = 292804, upload-time = "2026-03-31T08:02:36.035Z" },
 ]
 
 [[package]]
@@ -4953,11 +4979,11 @@ name = "vercel-workers"
 version = "0.0.25"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio" },
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "vercel" },
+    { name = "anyio", marker = "python_full_version >= '3.12'" },
+    { name = "httpx", marker = "python_full_version >= '3.12'" },
+    { name = "pydantic", marker = "python_full_version >= '3.12'" },
+    { name = "python-dotenv", marker = "python_full_version >= '3.12'" },
+    { name = "vercel", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/30/df/04d37021ad7ca53b7599c313e411d91623c7a005c741f491d1eefb7a9f0c/vercel_workers-0.0.25.tar.gz", hash = "sha256:212ded01400b524be51d251df49f801caf115ad7d48cca7eb168cbeceda3def3", size = 64149, upload-time = "2026-06-20T19:26:27.177Z" }
 wheels = [

@@ -44,7 +44,7 @@ git rebase --onto "$new_base" "$old_base" iollo
 # Resolve conflicts in distribution files, preserving upstream runtime behavior.
 uv sync --frozen --extra dev --extra messaging --extra mcp --extra web
 scripts/run_tests.sh               # full upstream suite, never bare pytest
-brew install zstd minisign actionlint shellcheck
+brew install zstd actionlint shellcheck
 actionlint .github/workflows/iollo-release.yml
 shellcheck scripts/iollo/*.sh
 scripts/iollo/build-mac-bundle.sh "iollo-${new_base#v}-rc1" arm64 /tmp/iollo-candidate
@@ -74,18 +74,15 @@ The workflow `.github/workflows/iollo-release.yml` runs on `iollo-*` tag pushes.
 Publishing is restricted to this fork. It produces:
 
 ```text
+registry.fly.io/instinct-sandboxes:hermes-base-<tag>   # the box base image
 ghcr.io/webaround-ai/hermes-agent:<tag>
 ghcr.io/webaround-ai/hermes-agent:<tag>-<12-character-checkout-sha>
 
 GitHub release assets:
   hermes-runtime-<tag>-macos-arm64.tar.zst
-  hermes-runtime-<tag>-macos-x86_64.tar.zst
-  <each archive>.minisig                 # signed releases only
+  hermes-runtime-<tag>-macos-x86_64.tar.zst   # best effort
   release.json
-  release.json.minisig                   # signed releases only
   SHA256SUMS
-  SHA256SUMS.minisig                     # signed releases only
-  iollo.minisign.pub                     # reference copy, NOT a trust anchor
 ```
 
 The box uses the **unchanged root Dockerfile**, built from the tagged checkout,
@@ -151,48 +148,42 @@ and box orchestrator own the product update policy and any additional tool provi
 
 `MANIFEST.json` lists every regular file and symlink except itself (a self-hash is
 impossible). Symlinks hash the literal link-target bytes and must stay inside the
-runtime. The archive's outer hash and signature cover the manifest too.
-`release.json` has `{tag, upstream_version, upstream_commit, image, assets}`; each
-asset has `{name, arch, sha256, size, signature_name}` with a byte count and either
-its `.minisig` name or `null`. `SHA256SUMS` covers both archives and `release.json`.
+runtime. The archive's outer SHA-256 covers the manifest too.
+
+`release.json` is the release train manifest, schema 1:
+
+```json
+{"schema": 1, "tag": "<tag>", "commit": "<40-hex tagged checkout>",
+ "upstream_version": "v2026.9.14", "upstream_commit": "<40-hex>",
+ "image": "ghcr.io/webaround-ai/hermes-agent:<tag>-<12-hex>",
+ "box_base_image": "registry.fly.io/instinct-sandboxes:hermes-base-<tag>",
+ "box_base_digest": "sha256:<64 hex> or null",
+ "assets": [{"name": "hermes-runtime-<tag>-macos-arm64.tar.zst", "arch": "arm64",
+             "sha256": "<64 hex>", "size": 0,
+             "url": "https://github.com/Webaround-ai/hermes-agent/releases/download/<tag>/<name>"}]}
+```
+
+`box_base_digest` is the `box` job's pushed image digest; local builds write `null`.
+Releases up to `iollo-2026.9.14-rc4` have the older shape (no `schema`, `commit`,
+`box_base_*` or `url`; a `signature_name` per asset). `check-archive` accepts both.
+`SHA256SUMS` covers the archives and `release.json`. After publishing, the `release`
+job downloads its own `release.json` and runs `release.py check-train` on it, which
+prints one line per problem and fails the job.
 
 ## Signing and trust
 
-The **Iollo minisign Ed25519 key** signs each compressed archive, `release.json`
-and `SHA256SUMS`. It does not sign Git tags, OCI images, Mach-O binaries or the Mac
-app. Apple Developer ID signing/notarization of the app is separate.
-If either signing secret is absent, signatures are omitted and the release title
-and body explicitly say **UNSIGNED**. If both are present but invalid, signing
-fails the release rather than falling back to unsigned publication.
-
-Generate the encrypted key once on a trusted Mac, upload it directly to repository
-secrets, and remove the temporary local secret file. Keep the public key in the Mac
-app source; the app must embed and trust that key, never a key downloaded alongside
-an update. Use a dedicated Iollo distribution key, not an upstream or Apple key.
-The only persistent private-key copy should be GitHub Secrets; losing it requires
-an app release that establishes trust in a replacement public key.
-
-```sh
-brew install minisign
-umask 077
-key_dir=$(mktemp -d)
-minisign -G -s "$key_dir/iollo.key" -p "$key_dir/iollo.pub"+# Choose a strong nonempty single-line password at the minisign prompts.
-gh secret set IOLLO_MINISIGN_SECRET_KEY --repo Webaround-ai/hermes-agent < "$key_dir/iollo.key"
-gh secret set IOLLO_MINISIGN_PASSWORD --repo Webaround-ai/hermes-agent
-# Enter the same password at gh's hidden prompt; do not put it in shell arguments.
-cp "$key_dir/iollo.pub" /path/to/mac-app/resources/iollo.minisign.pub
-rm -rf "$key_dir"
-```
-
-CI materializes the private key only in a mode-restricted temporary directory,
-supplies its password on stdin, disables shell tracing and removes the directory
-on exit. PR jobs receive no signing secrets and cannot publish.
-See the [minisign usage and signature format](https://jedisct1.github.io/minisign/).
+We do not sign anything. There is no minisign key, signature or public key. The Mac
+app embeds the arm64 tarball at build time, checks it against the SHA-256 pinned in
+its own repository, and Apple's signature and notarization of the app cover the
+result. Boxes take `box_base_image` for the same tag. `SHA256SUMS` and the per-asset
+SHA-256 are integrity checks only. After this change the old repository secrets
+`IOLLO_MINISIGN_SECRET_KEY` and `IOLLO_MINISIGN_PASSWORD` are unused; the owner may
+delete them.
 
 ## Local and CI verification
 
 Prerequisites: native macOS for the chosen architecture, git, curl, Python 3.9+
-for the packaging helpers, zstd, and minisign for signed releases. No developer
+for the packaging helpers, and zstd. No developer
 Python environment is used to run Hermes. Keep the output directory outside the
 checkout (or under the already-ignored `dist/`). A successful build automatically
 relocates to a path containing spaces, runs imports and help checks, boots the
@@ -201,31 +192,27 @@ GET `/v1/models`, waits for running state, and stops it with the upstream SIGINT
 foreground shutdown contract. It then creates and verifies the archive.
 
 ```sh
-brew install zstd minisign
+brew install zstd
 scripts/iollo/build-mac-bundle.sh iollo-2026.9.14 arm64 /tmp/iollo-runtime
 scripts/iollo/verify-bundle.sh /tmp/iollo-runtime/hermes-runtime-iollo-2026.9.14-macos-arm64.tar.zst
 
-# For a downloaded signed release: put release.json, release.json.minisig,
-# the archive and its .minisig together. Supply the app's trusted public key.
-scripts/iollo/verify-bundle.sh /path/to/archive.tar.zst /path/to/iollo.minisign.pub
+# For a downloaded release: put release.json and the archive together.
+scripts/iollo/verify-bundle.sh /path/to/archive.tar.zst
+python3 scripts/iollo/release.py check-train /path/to/release.json
 
 # To repeat the full smoke against an already extracted runtime:
 /path/to/runtime/python/bin/python3 scripts/iollo/smoke-bundle.py /path/to/runtime
 scripts/run_tests.sh tests/scripts/iollo/test_release.py
 ```
 
-The verifier first checks size/SHA256 against adjacent `release.json`. Signed
-releases require a trusted public key (a file or base64 minisign key); supplying
-one also forbids an unsigned downgrade. It verifies the archive and metadata
-signatures before extraction, rejects path escapes/special files, checks the
-complete manifest and embedded tag, then boots `bin/hermes --version` with empty
-environment, temporary user state and a different working directory. Unsigned
-verification emits a warning and checks integrity only. A production app should
-require signatures. Select an expected tag and prevent rollback in the app's
-update policy; minisign alone does not implement version ordering.
+The verifier first checks size/SHA256 against adjacent `release.json`, then
+rejects path escapes/special files, checks the complete manifest and embedded tag,
+and boots `bin/hermes --version` with empty environment, temporary user state and a
+different working directory. Version ordering and rollback belong to the Mac app,
+which pins one tag.
 
 PRs targeting `iollo` get an arm64 dry-run with the same builder and smoke checks;
-the unsigned archive, checksum list and metadata are workflow artifacts for seven
+the archive, checksum list and metadata are workflow artifacts for seven
 days. Tag jobs verify each architecture natively, publish the box image, and only
 then stage a GitHub draft containing all assets before publishing the release.
 If final publication fails, inspect/delete the incomplete draft before rerunning
@@ -237,14 +224,13 @@ Enable Actions and select the Intel runner as above, allow the jobs' scoped toke
 and ensure this repository can write its GHCR package. If the package already exists,
 grant it Actions access to this repository. Choose public package visibility if Fly
 pulls anonymously; otherwise provision Fly's registry pull credentials. GitHub's
-repository/package visibility settings are separate. Configure both minisign secrets
-and embed the matching public key in the app before relying on signed updates.
+repository/package visibility settings are separate.
 
-Open integration decisions: confirm whether cloud boxes really use the release tag
-or the later `e10934b0` commit; enable an Intel runner; choose GHCR visibility; wire
-the Mac updater and box deployer to this fork's releases, choose stable versus RC
-channels, and define staged rollout/rollback policy. These consumer changes are
-outside this build/release-only patch.
+Open integration decisions, answered 2026-09-24: the Mac app pins one fork tag and
+embeds that tag's arm64 tarball, checked against the SHA-256 in its own repository
+(iollo-mac brief 028); the cloud promote command rolls boxes onto
+`hermes-base-<tag>` for the same tag (iollo brief 030). Still open: an Intel runner
+and GHCR visibility. These consumer changes live in those repositories.
 
 ## Box image on the Fly registry (added 2026-09-24)
 

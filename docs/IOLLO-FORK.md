@@ -119,11 +119,25 @@ INSTALL-REPORT.json       # pip's installation receipt for this checkout
 
 The builder exports `uv.lock` using a temporary **uv 0.11.6** environment, installs
 the dependency closure with pip's hash checking, then runs `pip install --no-deps`
-on this checkout with **messaging, mcp, web** extras. `aiohttp` in messaging powers
+on this checkout with **messaging, mcp, web, iollo-memory** extras. `aiohttp` in messaging powers
 the `api_server` gateway adapter; MCP and the web/serve stack are also included.
 There is no standalone `api_server --help`: it is an adapter enabled through gateway
 configuration. CI checks the gateway CLI help, the `gateway.run` module help and
 the actual HTTP server in a foreground gateway.
+
+The `iollo_notes` memory provider (brief 003) needs the **iollo-memory** extra
+(onnxruntime, sqlite-vec, tokenizers; onnxruntime has no macOS x86_64 wheel, so Intel
+runtimes search with FTS only) and its embedding model, all-MiniLM-L6-v2 int8 ONNX
+(about 23 MB). The model is never committed and never downloaded at runtime:
+`scripts/iollo/fetch-embedding-model.py` fetches `model.onnx` and `tokenizer.json` at
+release-build time and fails the build unless both match the size and SHA-256 pinned in
+`plugins/memory/iollo_notes/model.json`. It lands in
+`hermes-runtime-<tag>-macos-<arch>/hermes/plugins/memory/iollo_notes/model/` in the Mac
+tarball (covered by `MANIFEST.json` and the archive hash; the smoke boot loads it) and at
+`/opt/hermes/plugins/memory/iollo_notes/model/` in the box image (the box job fetches it
+into the build context; the unchanged Dockerfile's `COPY . .` and `--extra all`, which now
+includes iollo-memory, do the rest). The provider loads it from there
+(`IOLLO_EMBED_MODEL_DIR` overrides); a missing or mismatched file means FTS-only search.
 
 Upstream's `setup.py` blocks normal wheel builds because wheels omit source-relative
 assets. The builder uses the existing **HERMES_NIX_BUILD=1** switch only for the pip

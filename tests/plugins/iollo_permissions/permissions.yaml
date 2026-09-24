@@ -1,5 +1,3 @@
-# Fixture copy of Webaround-ai/iollo control-plane/app/permissions.yaml (brief 031, iollo PR #126, commit 2b0853b).
-# The cloud file is the source of truth; refresh this copy when it changes.
 # Iollo permission tiers (brief 031, docs/PERMISSIONS.md). One policy for the box and the Mac, enforced by the
 # same Hermes code (the fork's iollo-permissions plugin). The tier sections are both Jev's rubric (rendered as a
 # <tier-rubric> block) and the keyword detectors used only when Jev is unavailable. Tier 4 is code and runs

@@ -40,6 +40,40 @@ _CREATE_VERBS = {"touch", "mkdir"}
 _DEV_ALLOWED = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/zero", "/dev/random", "/dev/urandom")
 _UNRESOLVED = None
 
+# Quoted arguments are data unless a shell -c/eval wrapper executes them or a double-quoted
+# span contains command substitution. Keep those execution contexts visible to the policy.
+_SQUOTE = r"'[^'\\]*'"
+_DQUOTE = r'"(?:[^"\\]|\\.)*"'
+_QUOTE_SPAN = re.compile(f"{_SQUOTE}|{_DQUOTE}", re.S)
+_EXEC_C = re.compile(r"(?:^|[\s;&|(])(?:(?:[\w./-]*/)?(?:bash|sh|zsh|dash|ksh)\s+(?:-\S+\s+)*-\w*c|eval)$", re.I)
+_SUBSHELL = re.compile(r"\$\(|`|<\(")
+
+
+def _unquote_for_scan(command: str) -> str:
+    """Mask quoted data, recursively scanning shell -c/eval arguments and keeping substitutions.
+
+    Malformed quoting keeps the raw command so it cannot weaken the hard-block scan.
+    """
+    try:
+        shlex.split(command)
+    except ValueError:
+        return command
+    parts = []
+    last = 0
+    for m in _QUOTE_SPAN.finditer(command):
+        parts.append(command[last:m.start()])
+        span = m.group(0)
+        inner = span[1:-1]
+        if _EXEC_C.search(command[:m.start()].rstrip()):
+            parts.append(" " + _unquote_for_scan(inner) + " ")
+        elif span[0] == '"' and _SUBSHELL.search(inner):
+            parts.append(" " + inner + " ")
+        else:
+            parts.append(" ")
+        last = m.end()
+    parts.append(command[last:])
+    return "".join(parts)
+
 
 @dataclass(frozen=True)
 class Target:
@@ -62,8 +96,9 @@ def command_variants(command: str) -> List[str]:
 def match_tier4_command(command: str, settings: Settings) -> Optional[str]:
     """The ``action`` of the first ``tier4.commands`` rule matching any variant, else None."""
     for variant in command_variants(command):
+        scan = _unquote_for_scan(variant)
         for rule in settings.policy.tier4_commands:
-            if rule.regex.search(variant):
+            if rule.regex.search(scan):
                 return rule.action
     return None
 

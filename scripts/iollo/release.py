@@ -29,7 +29,7 @@ def digest(path):
 
 
 def git(*args):
-    return subprocess.check_output(["git", "-C", str(REPO), *args], text=True).strip()
+    return subprocess.check_output(["git", "-C", str(REPO), *args], text=True, encoding="utf-8").strip()
 
 
 def provenance(tag):
@@ -65,14 +65,14 @@ def create(tag, directory, box_digest_value=None, require_both=False):
     if not assets or (require_both and len(assets) != 2):
         raise ValueError("Missing runtime archive(s)")
     metadata["assets"] = assets
-    (directory / "release.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    (directory / "release.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     paths = [directory / asset["name"] for asset in assets] + [directory / "release.json"]
-    (directory / "SHA256SUMS").write_text("".join(f"{digest(path)}  {path.name}\n" for path in paths))
+    (directory / "SHA256SUMS").write_text("".join(f"{digest(path)}  {path.name}\n" for path in paths), encoding="utf-8")
 
 
 def check_archive(archive):
     """Integrity of one archive against the adjacent release.json (rc4 shape or schema 1)."""
-    metadata = json.loads((archive.parent / "release.json").read_text())
+    metadata = json.loads((archive.parent / "release.json").read_text(encoding="utf-8"))
     if metadata.get("schema", SCHEMA) != SCHEMA:
         raise ValueError("Unsupported release.json schema")
     if not TAG.fullmatch(metadata["tag"]):
@@ -153,7 +153,7 @@ if __name__ == "__main__":
         _, asset = check_archive(args.archive)
         print(f"{asset['name']}: size and SHA-256 match release.json")
     else:
-        found = check_train(json.loads(args.release_json.read_text()))
+        found = check_train(json.loads(args.release_json.read_text(encoding="utf-8")))
         for problem in found:
             print(problem)
         if found:

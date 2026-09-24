@@ -37,7 +37,7 @@ def smoke(root):
             "platforms": {"api_server": {"enabled": True, "host": "127.0.0.1", "port": port}},
         }
         # JSON is also YAML; no additional tooling is needed to prepare the probe.
-        (state / "config.yaml").write_text(json.dumps(config))
+        (state / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
         key = secrets.token_hex(32)
         env = {"HOME": str(home), "HERMES_HOME": str(state), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                "LANG": "C.UTF-8", "API_SERVER_KEY": key, "OPENAI_API_KEY": "sk-iollo-smoke-unused",
@@ -76,7 +76,7 @@ def smoke(root):
                             payload = json.load(response)
                             assert response.status == 200 and payload["object"] == "list" and payload["data"]
                             status_path = state / "gateway_state.json"
-                            if status_path.exists() and json.loads(status_path.read_text()).get("gateway_state") == "running":
+                            if status_path.exists() and json.loads(status_path.read_text(encoding="utf-8")).get("gateway_state") == "running":
                                 print("GET /v1/models: HTTP 200", json.dumps(payload), flush=True)
                                 break
                     except (urllib.error.URLError, TimeoutError):
@@ -86,17 +86,17 @@ def smoke(root):
                     raise RuntimeError("Gateway did not answer /v1/models within 120 seconds")
             except BaseException:
                 log.flush()
-                print(log_path.read_text(), file=sys.stderr)
+                print(log_path.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
                 raise
             finally:
                 if process.poll() is None:
                     # Upstream deliberately returns 1 for an unplanned SIGTERM.
                     # SIGINT is the documented foreground gateway stop path.
-                    os.killpg(process.pid, signal.SIGINT)
+                    os.killpg(process.pid, signal.SIGINT)  # windows-footgun: ok — macOS-only bundle smoke
                     try:
                         process.wait(timeout=30)
                     except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        os.killpg(process.pid, signal.SIGKILL)  # windows-footgun: ok — macOS-only bundle smoke
                         process.wait(timeout=10)
             if process.returncode != 0:
                 raise RuntimeError(f"Gateway shutdown failed: {process.returncode}\n{log_path.read_text()}")

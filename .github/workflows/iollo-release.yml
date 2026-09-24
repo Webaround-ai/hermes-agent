@@ -39,6 +39,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to the Fly registry (boxes pull from there)
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: registry.fly.io
+          username: x
+          password: ${{ secrets.FLY_API_TOKEN }}
       - name: Build unchanged upstream Dockerfile (Fly boxes are amd64)
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
@@ -47,6 +53,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
+            registry.fly.io/instinct-sandboxes:hermes-base-${{ github.ref_name }}
             ghcr.io/webaround-ai/hermes-agent:${{ github.ref_name }}
             ghcr.io/webaround-ai/hermes-agent:${{ github.ref_name }}-${{ steps.metadata.outputs.sha }}
           labels: |

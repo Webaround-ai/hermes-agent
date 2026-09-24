@@ -245,3 +245,10 @@ or the later `e10934b0` commit; enable an Intel runner; choose GHCR visibility; 
 the Mac updater and box deployer to this fork's releases, choose stable versus RC
 channels, and define staged rollout/rollback policy. These consumer changes are
 outside this build/release-only patch.
+
+## Box image on the Fly registry (added 2026-09-24)
+
+The `box` job also pushes the same image to `registry.fly.io/instinct-sandboxes:hermes-base-<tag>`,
+using the repository secret `FLY_API_TOKEN` (a Fly deploy token scoped to the `instinct-sandboxes`
+app). The iollo cloud repository's `sandbox/Dockerfile` starts `FROM` that tag, so a fork release is the
+box base image with no manual mirroring step. GHCR keeps a copy for reference; it is private.

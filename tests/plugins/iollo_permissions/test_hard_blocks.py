@@ -43,6 +43,36 @@ def test_tier4_command_blocks_without_judge(plugin, box, command):
     assert box.judge.calls == 0
 
 
+@pytest.mark.parametrize("command", [
+    'git commit -m "use sudo"',
+    'echo "please run sudo apt-get update later"',
+    "git commit -m 'note: dd if=/dev/zero is dangerous'",
+    'grep -rn "csrutil disable" docs/',
+])
+def test_hardblock_quoted_strings_not_matched(plugin, box, command):
+    """Tier-4 words in quoted argument data must reach the judge instead of a hard block."""
+    assert _terminal(plugin, box, command) is None
+    assert box.judge.calls == 1
+
+
+@pytest.mark.parametrize("command", [
+    "sudo rm -rf /",
+    "echo hi; sudo ls /",
+    'bash -c "sudo ls /"',
+    "sh -c 'sudo ls /'",
+    'echo "$(sudo ls /)"',
+    'echo "$(dd if=/dev/zero of=/dev/disk0)"',
+    'bash -lc "sudo ls /"',
+    'eval "sudo ls /"',
+])
+def test_hardblock_quoted_strings_still_blocks_execution_context(plugin, box, command):
+    """Shell wrappers and command substitutions execute their quoted text and stay blocked."""
+    result = _terminal(plugin, box, command)
+    assert result["action"] == "block"
+    assert result["message"].startswith("Stopped before ") and result["message"].endswith("Iollo never does this.")
+    assert box.judge.calls == 0
+
+
 def _destructive(box):
     ws, out = box.ws, box.outside
     (out / "notes.txt").write_text("keep me")

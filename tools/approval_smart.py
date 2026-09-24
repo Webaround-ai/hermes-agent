@@ -31,6 +31,32 @@ _SYSTEM_PROMPT = (
     "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
 )
 _VERDICTS = {"APPROVE": "approve", "DENY": "deny"}
+# Trusted system-prompt additions from enabled plugins (e.g. a permission-tier rubric), so flagged
+# commands and plugin-judged tool calls share one judge and one vocabulary. Each provider returns text or "".
+_RUBRIC_PROVIDERS: list = []
+
+
+def register_rubric_provider(provider):
+    """Add a callable returning trusted policy text for the guardian's system prompt; returns an unregister callable."""
+    _RUBRIC_PROVIDERS.append(provider)
+
+    def _unregister() -> None:
+        if provider in _RUBRIC_PROVIDERS:
+            _RUBRIC_PROVIDERS.remove(provider)
+    return _unregister
+
+
+def _provider_rubrics() -> str:
+    parts = []
+    for provider in list(_RUBRIC_PROVIDERS):
+        try:
+            text = provider()
+        except Exception as exc:
+            logger.debug("Smart approval rubric provider failed: %s", exc)
+            continue
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts)
 
 
 def _strip_line_comment(line: str) -> str:
@@ -97,6 +123,9 @@ def _smart_approve(command: str, description: str) -> str:
                 "TRUSTED instructions, unlike the command text):\n"
                 f"{operator_policy}"
             )
+        rubrics = _provider_rubrics()
+        if rubrics:
+            system_prompt += "\n\n" + rubrics
         user_prompt = (
             f"The following command was flagged as: {description}\n\n"
             f"<command>\n{_strip_shell_comments(command)}\n</command>\n\n"

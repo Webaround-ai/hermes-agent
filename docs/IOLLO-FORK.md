@@ -11,10 +11,13 @@ they must not run upstream's installer/updater as their product update path.
 
 - `main` tracks `NousResearch/hermes-agent:main`, without Iollo changes.
 - `iollo` is an upstream release tag plus our patches: distribution machinery isolated in
-  `scripts/iollo/`, this document, one workflow and its tests; and the bundled
+  `scripts/iollo/`, this document, one workflow and its tests; the bundled
   `plugins/iollo-permissions/` plugin (brief 002: tier-4 hard blocks, the approval model as
   tier judge, versions, `files_trash`, activity file), off unless enabled, plus one generic
-  hook in `tools/approval_smart.py` (`register_rubric_provider`) that it uses.
+  hook in `tools/approval_smart.py` (`register_rubric_provider`) that it uses; the additive
+  runs-event trace fields documented in [IOLLO-RUN-TRACE.md](IOLLO-RUN-TRACE.md); and the
+  vendored `iollo_envelope/` producer (see its `VENDORED` file) that the runs API serves as
+  envelope revisions.
 - The initial base is upstream **v2026.9.14**, package version **0.21.3**, commit
   **345cd2b057a452236de401d3534b8502a7465e8d** (the peeled annotated tag).
   The previously recorded **e10934b03e115b036b3c38b9c6e6817039a5962d** is a later
@@ -86,6 +89,18 @@ GitHub release assets:
   release.json
   SHA256SUMS
 ```
+
+The shared reply producer is vendored unchanged under `iollo_envelope/`, with its
+source commit in `iollo_envelope/VENDORED`. Package discovery and catalog package
+data include it in both the Mac wheel and box image. The bounded install hook at
+the end of `gateway/platforms/api_server_runs.py` adds envelope SSE and inputs
+routes and enriches run status with the same locally stored envelope. It retains
+the existing runs authorization and callback seams. Mac callers may provide
+`envelope_context` with `surface: mac` and a public integer `conversation_id`.
+The producer uses `HERMES_HOME/state.db`; it does not import the control plane.
+The build and relocated smoke verify imports, catalog data, revision identity,
+and envelope route authentication. The scripted integration test is
+`tests/gateway/test_iollo_envelope_runtime.py`.
 
 The box uses the **unchanged root Dockerfile**, built from the tagged checkout,
 and pushes with `GITHUB_TOKEN` and job-scoped `packages: write`. It is **linux/amd64

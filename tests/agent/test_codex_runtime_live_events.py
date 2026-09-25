@@ -70,6 +70,9 @@ def test_stable_ids_match_history_projector():
     assert call_id == _deterministic_call_id("mcp__filesystem__read", "m1")
     assert name == "mcp.filesystem.read"
     assert args == {"path": "a.py"}
+    assert calls["tool_progress"][-1][1]["tool_call_id"] == call_id
+    bridge({"method": "item/completed", "params": {"item": mcp}})
+    assert calls["tool_progress"][-1][1]["tool_call_id"] == call_id
 
     calls["tool_start"].clear()
     patch = {
@@ -102,7 +105,6 @@ def test_failed_command_result_and_error_flag_are_preserved():
     assert is_error is True
     assert calls["tool_progress"][0][1]["is_error"] is True
     assert calls["tool_complete"][0][3] == "[exit 2]\nboom"
-
 
 
 

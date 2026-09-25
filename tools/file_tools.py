@@ -891,7 +891,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             rewrite_hint = _whole_file_rewrite_hint(task_id, _resolved, content)
             file_ops = _get_file_ops(task_id)
             existed = file_ops._path_exists_probe(_resolved or path).stdout.strip()
-            result_dict = file_ops.write_file(_resolved or path, content).to_dict()
+            result = file_ops.write_file(_resolved or path, content)
+            result_dict = result.to_dict()
             if not result_dict.get("error") and existed in {"exists", "not_found"}:
                 result_dict["op"] = "edit" if existed == "exists" else "create"
             if warnings:

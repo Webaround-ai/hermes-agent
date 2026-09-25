@@ -889,16 +889,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
                 return json.dumps(_stale_write_refusal(path, blocker, _resolved), ensure_ascii=False)
             warnings = _edit_warnings([path], path_to_resolved, task_id)
             rewrite_hint = _whole_file_rewrite_hint(task_id, _resolved, content)
-<<<<<<< HEAD
-            result = _get_file_ops(task_id).write_file(_resolved or path, content)
-            result_dict = result.to_dict()
-=======
             file_ops = _get_file_ops(task_id)
-            existed = file_ops._path_exists_probe(_resolved or path).strip()
+            existed = file_ops._path_exists_probe(_resolved or path).stdout.strip()
             result_dict = file_ops.write_file(_resolved or path, content).to_dict()
             if not result_dict.get("error") and existed in {"exists", "not_found"}:
                 result_dict["op"] = "edit" if existed == "exists" else "create"
->>>>>>> 44fb51aa03 (Runs API: additive trace fields on tool events (#8))
             if warnings:
                 result_dict["_warning"] = warnings[0]
             if rewrite_hint and not result_dict.get("error"):

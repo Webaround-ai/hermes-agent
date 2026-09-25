@@ -37,7 +37,7 @@ def smoke(root):
             "platforms": {"api_server": {"enabled": True, "host": "127.0.0.1", "port": port}},
         }
         # JSON is also YAML; no additional tooling is needed to prepare the probe.
-        (state / "config.yaml").write_text(json.dumps(config))
+        (state / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
         key = secrets.token_hex(32)
         env = {"HOME": str(home), "HERMES_HOME": str(state), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                "LANG": "C.UTF-8", "API_SERVER_KEY": key, "OPENAI_API_KEY": "sk-iollo-smoke-unused",
@@ -54,6 +54,17 @@ def smoke(root):
              "from pathlib import Path; import sys; "
              "assert Path(run_agent.__file__).resolve().is_relative_to(Path(sys.prefix).parent); "
              "print('Bundled imports OK:', sys.executable)"])
+        # The pinned embedding model is inside the runtime and loads from there (onnxruntime has no
+        # macOS x86_64 wheel, so Intel runtimes check the files and fall back to FTS-only search).
+        run([python, "-I", "-B", "-c", "import platform, sqlite3, sys; from pathlib import Path; "
+             "from plugins.memory.iollo_notes import embedder as m; "
+             "d = m.model_dir(); problems = m.verify_model_dir(d); assert not problems, problems; "
+             "assert d.resolve().is_relative_to(Path(sys.prefix).parent), d; "
+             "import sqlite_vec, tokenizers; "
+             "e = m.load_embedder() if platform.machine() == 'arm64' else None; "
+             "assert platform.machine() != 'arm64' or (e is not None and len(e.embed(['my dentist'])[0]) == 384); "
+             "c = sqlite3.connect(':memory:'); vec = hasattr(c, 'enable_load_extension'); "
+             "print('Embedding model OK:', d, '(sqlite-vec loadable)' if vec else '(brute-force cosine)')"])
         run([launcher, "--version"])
         run([launcher, "gateway", "--help"])
         run([launcher, "gateway", "run", "--help"])
@@ -77,7 +88,7 @@ def smoke(root):
                             payload = json.load(response)
                             assert response.status == 200 and payload["object"] == "list" and payload["data"]
                             status_path = state / "gateway_state.json"
-                            if status_path.exists() and json.loads(status_path.read_text()).get("gateway_state") == "running":
+                            if status_path.exists() and json.loads(status_path.read_text(encoding="utf-8")).get("gateway_state") == "running":
                                 print("GET /v1/models: HTTP 200", json.dumps(payload), flush=True)
                                 break
                     except (urllib.error.URLError, TimeoutError):
@@ -96,17 +107,17 @@ def smoke(root):
                         raise AssertionError(f"Envelope probe should return {expected}")
             except BaseException:
                 log.flush()
-                print(log_path.read_text(), file=sys.stderr)
+                print(log_path.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
                 raise
             finally:
                 if process.poll() is None:
                     # Upstream deliberately returns 1 for an unplanned SIGTERM.
                     # SIGINT is the documented foreground gateway stop path.
-                    os.killpg(process.pid, signal.SIGINT)
+                    os.killpg(process.pid, signal.SIGINT)  # windows-footgun: ok — macOS-only bundle smoke
                     try:
                         process.wait(timeout=30)
                     except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        os.killpg(process.pid, signal.SIGKILL)  # windows-footgun: ok — macOS-only bundle smoke
                         process.wait(timeout=10)
             if process.returncode != 0:
                 raise RuntimeError(f"Gateway shutdown failed: {process.returncode}\n{log_path.read_text()}")

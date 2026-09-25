@@ -21,6 +21,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -33,6 +35,9 @@ jobs:
         run: |
           python3 scripts/iollo/release.py check-tag "$TAG"
           echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Put the pinned embedding model into the build context
+        # COPY . . lands it at /opt/hermes/plugins/memory/iollo_notes/model/ in the image.
+        run: python3 scripts/iollo/fetch-embedding-model.py plugins/memory/iollo_notes/model
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -46,6 +51,7 @@ jobs:
           username: x
           password: ${{ secrets.FLY_API_TOKEN }}
       - name: Build unchanged upstream Dockerfile (Fly boxes are amd64)
+        id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
@@ -83,30 +89,23 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install packaging tools
-        run: brew install zstd minisign
+        run: brew install zstd
       - name: Build and smoke boot relocated runtime
         env:
           TAG: ${{ github.ref_name }}
           ARCH: ${{ matrix.arch }}
         run: scripts/iollo/build-mac-bundle.sh "$TAG" "$ARCH" dist/iollo
-      - name: Sign if both secrets exist, then verify on the target architecture
+      - name: Verify integrity and boot on the target architecture
         env:
           TAG: ${{ github.ref_name }}
           ARCH: ${{ matrix.arch }}
-          IOLLO_MINISIGN_SECRET_KEY: ${{ secrets.IOLLO_MINISIGN_SECRET_KEY }}
-          IOLLO_MINISIGN_PASSWORD: ${{ secrets.IOLLO_MINISIGN_PASSWORD }}
         run: |
-          scripts/iollo/sign-release.sh "$TAG" dist/iollo
-          archive="dist/iollo/hermes-runtime-$TAG-macos-$ARCH.tar.zst"
-          if [[ -f dist/iollo/iollo.minisign.pub ]]; then
-            scripts/iollo/verify-bundle.sh "$archive" dist/iollo/iollo.minisign.pub
-          else
-            scripts/iollo/verify-bundle.sh "$archive"
-          fi
+          scripts/iollo/make-release.sh "$TAG" dist/iollo
+          scripts/iollo/verify-bundle.sh "dist/iollo/hermes-runtime-$TAG-macos-$ARCH.tar.zst"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: runtime-${{ matrix.arch }}
-          path: dist/iollo/*.tar.zst*
+          path: dist/iollo/*.tar.zst
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -128,14 +127,13 @@ jobs:
           pattern: runtime-*
           merge-multiple: true
           path: dist/iollo
-      - name: Install signer
-        run: sudo apt-get update && sudo apt-get install -y minisign
-      - name: Assemble release metadata and sign
+      - name: Assemble release metadata (not signed by us)
         env:
           TAG: ${{ github.ref_name }}
-          IOLLO_MINISIGN_SECRET_KEY: ${{ secrets.IOLLO_MINISIGN_SECRET_KEY }}
-          IOLLO_MINISIGN_PASSWORD: ${{ secrets.IOLLO_MINISIGN_PASSWORD }}
-        run: scripts/iollo/sign-release.sh "$TAG" dist/iollo
+          BOX_DIGEST: ${{ needs.box.outputs.digest }}
+        run: |
+          scripts/iollo/make-release.sh "$TAG" dist/iollo --box-digest "$BOX_DIGEST"
+          python3 scripts/iollo/release.py check-train dist/iollo/release.json
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -143,19 +141,16 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           title="Iollo $TAG"
-          if jq -e '.assets | all(.signature_name != null)' dist/iollo/release.json >/dev/null; then
-            signing='Archives, release.json and SHA256SUMS are signed with the Iollo minisign key.'
-          else
-            title="$title — UNSIGNED"
-            signing='UNSIGNED: no publisher signature. Both IOLLO_MINISIGN secrets must be configured for signed releases.'
-          fi
           {
-            printf '%s\n\n' "$signing"
-            printf 'Upstream: %s (%s).\n\n' \
+            printf 'Not signed by us: the Mac app embeds the runtime tarball at build time, checks it against the SHA-256 pinned in its own repo, and Apple notarization covers the result.\n\n'
+            printf 'Commit: %s. Upstream: %s (%s).\n\n' \
+              "$(jq -r .commit dist/iollo/release.json)" \
               "$(jq -r .upstream_version dist/iollo/release.json)" \
               "$(jq -r .upstream_commit dist/iollo/release.json)"
-            printf 'Box image (linux/amd64): %s.\n\n' "$(jq -r .image dist/iollo/release.json)"
-            printf 'Mac runtimes: the architectures listed in release.json (arm64 always; x86_64 when its best-effort build succeeded). Download release.json and the matching archive/signatures together. Verify using scripts/iollo/verify-bundle.sh and the public key embedded in the Mac app.\n'
+            printf 'Box base image (linux/amd64): %s@%s.\n\n' \
+              "$(jq -r .box_base_image dist/iollo/release.json)" \
+              "$(jq -r .box_base_digest dist/iollo/release.json)"
+            printf 'Mac runtimes: the architectures listed in release.json (arm64 always; x86_64 when its best-effort build succeeded), each with its SHA-256 and download URL. Verify integrity with scripts/iollo/verify-bundle.sh.\n'
           } > "$RUNNER_TEMP/iollo-release-notes.md"
           prerelease=()
           if [[ "$TAG" =~ -rc[0-9]+$ ]]; then
@@ -165,6 +160,14 @@ jobs:
           gh release create "$TAG" --verify-tag --draft "${prerelease[@]}" \
             --title "$title" --notes-file "$RUNNER_TEMP/iollo-release-notes.md" dist/iollo/*
           gh release edit "$TAG" --draft=false
+      - name: Check the published release.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release download "$TAG" --pattern release.json --dir "$RUNNER_TEMP/published"
+          python3 scripts/iollo/release.py check-train "$RUNNER_TEMP/published/release.json"
 
   dry-run:
     if: github.event_name == 'pull_request'
@@ -177,7 +180,7 @@ jobs:
           persist-credentials: false
       - name: Install packaging tools
         run: brew install zstd
-      - name: Build arm64 runtime without publishing or signing
+      - name: Build arm64 runtime without publishing
         env:
           RUN_NUMBER: ${{ github.run_number }}
         run: |

@@ -971,6 +971,66 @@ class TestWebhookApprovalExclusion:
         assert result["approved"] is False
         assert "api_server" in result["message"]
 
+    def _api_server_session(self, monkeypatch, session_key):
+        self._isolate(monkeypatch)
+        for name in ("HERMES_CRON_SESSION", "HERMES_GATEWAY_SESSION", "HERMES_INTERACTIVE", "HERMES_EXEC_ASK"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "api_server")
+        monkeypatch.setenv("HERMES_SESSION_KEY", session_key)
+
+    def test_api_server_with_listener_is_attended(self, monkeypatch):
+        """Iollo: a /v1/runs run registers an approval listener, so it can ask."""
+        import tools.approval as mod
+
+        self._api_server_session(monkeypatch, "test-api-run")
+        assert mod._is_unattended_platform_approval_context() is True
+        mod.register_gateway_notify("test-api-run", lambda data: None)
+        try:
+            assert mod._is_unattended_platform_approval_context() is False
+            assert mod._is_gateway_approval_context() is True
+        finally:
+            mod.unregister_gateway_notify("test-api-run")
+        assert mod._is_unattended_platform_approval_context() is True
+
+    def test_api_server_plugin_approval_without_listener_is_blocked(self, monkeypatch):
+        """Chat completions (no listener) keep the unattended deny."""
+        from tools.approval import request_tool_approval
+
+        self._api_server_session(monkeypatch, "test-api-chat")
+        result = request_tool_approval("browser_click", "tier3:pay: Pay 40 EUR", rule_key="pay")
+        assert result["approved"] is False
+        assert "unattended platform (api_server)" in result["message"]
+
+    def test_api_server_plugin_approval_with_listener_asks(self, monkeypatch):
+        """A plugin ``approve`` directive in a /v1/runs run reaches the listener and waits for the answer."""
+        import threading
+        import time
+        import tools.approval as mod
+
+        self._api_server_session(monkeypatch, "test-api-run-ask")
+        monkeypatch.setattr(mod, "is_approved", lambda sk, pk: False)
+        notified = []
+        mod.register_gateway_notify("test-api-run-ask", lambda data: notified.append(data))
+        holder = {}
+
+        def _ask():
+            holder["r"] = mod.request_tool_approval("browser_click", "tier3:pay: Pay 40 EUR", rule_key="pay")
+
+        try:
+            t = threading.Thread(target=_ask)
+            t.start()
+            for _ in range(400):
+                if mod._gateway_queues.get("test-api-run-ask"):
+                    break
+                time.sleep(0.005)
+            mod.resolve_gateway_approval("test-api-run-ask", "once")
+            t.join(timeout=5)
+        finally:
+            mod.unregister_gateway_notify("test-api-run-ask")
+        assert len(notified) == 1
+        assert notified[0]["description"] == "tier3:pay: Pay 40 EUR"
+        assert holder["r"]["approved"] is True
+
     def test_execute_code_denied_on_unattended_platform(self, monkeypatch):
         """execute_code is denied instantly on unattended platforms (parity with cron)."""
         from tools.approval import check_execute_code_guard

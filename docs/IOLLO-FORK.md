@@ -20,11 +20,12 @@ they must not run upstream's installer/updater as their product update path.
   envelope revisions; and one approval fix in `tools/approval_context.py`: an `api_server` session
   with a registered approval listener (every `/v1/runs` run) counts as attended, so it asks instead of
   refusing as an unattended platform.
-- The initial base is upstream **v2026.9.14**, package version **0.21.3**, commit
-  **345cd2b057a452236de401d3534b8502a7465e8d** (the peeled annotated tag).
-  The previously recorded **e10934b03e115b036b3c38b9c6e6817039a5962d** is a later
-  September 20 commit, not this tag. Confirm the running cloud boxes separately
-  before assuming they have exactly this source.
+- The current base is upstream **v2026.9.24**, package version **0.21.5**, commit
+  **f97608f178d1ffeca59860195ab7da295f7c8e5f** (the peeled annotated tag), rebased from
+  v2026.9.14 (0.21.3) on 2026-09-25. That rebase tagged on targeted tests only (owner's call);
+  four upstream-native test failures also fail on a clean v2026.9.24 checkout. The run stream
+  keeps upstream's tool-output preview off (`_EMIT_TOOL_COMPLETED_PREVIEW` in
+  `gateway/platforms/api_server_runs.py`).
 
 ```sh
 git remote -v
@@ -45,7 +46,7 @@ git merge --ff-only upstream/main
 git push origin main
 
 git switch iollo
-old_base=v2026.9.14
+old_base=v2026.9.24
 new_base=v2026.10.1                 # example; choose an actual reviewed upstream tag
 git rebase --onto "$new_base" "$old_base" iollo
 # Resolve conflicts in distribution files, preserving upstream runtime behavior.
@@ -170,7 +171,7 @@ The only source-tree cleanup removes pip-generated build/egg-info directories.
 `bin/hermes` uses only `python/bin/python3`, prevents host Python path/user-site
 injection, and exports the supplied `HERMES_HOME`; if absent, it asks Hermes's own
 `get_hermes_home()` for the default. It preserves the working directory and arguments.
-Hermes's own `--version` remains 0.21.3; `VERSION` is the Iollo product release tag.
+Hermes's own `--version` remains the upstream version (0.21.5); `VERSION` is the Iollo product release tag.
 The distribution is called `hermes-agent`; this checkout has **no import package
 named `hermes_agent`**. Smoke tests import its real top-level modules instead.
 

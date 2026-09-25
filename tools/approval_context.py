@@ -141,8 +141,25 @@ def _is_unattended_platform_approval_context() -> bool:
     do, but there is no human who can resolve a pending approval. Treating them as gateway approval contexts
     blocks the session for the full approval timeout (60-300s) and then fails closed anyway — the deadlock
     in #37284/#87509.
+
+    Iollo: a session with a registered approval listener is attended. ``/v1/runs`` registers one per run
+    (the run parks as ``waiting_for_approval`` and ``POST /v1/runs/{id}/approval`` answers it), so treating
+    it as unattended refused every plugin ``approve`` directive and dangerous command with nobody asked.
     """
-    return _get_session_platform() in _UNATTENDED_APPROVAL_PLATFORMS
+    return _get_session_platform() in _UNATTENDED_APPROVAL_PLATFORMS and not _has_approval_listener()
+
+
+def _has_approval_listener() -> bool:
+    """True when an approval notify callback is registered for the current session key."""
+    session_key = get_current_session_key("")
+    if not session_key:
+        return False
+    try:
+        from tools import approval as _approval
+    except Exception:
+        return False
+    # Lock-free read (a dict lookup is atomic): callers may already hold ``tools.approval._lock``.
+    return _approval._gateway_notify_cbs.get(session_key) is not None
 
 
 def _is_single_query_approval_context() -> bool:

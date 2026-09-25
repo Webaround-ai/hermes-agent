@@ -49,6 +49,23 @@ HERMES_NIX_BUILD=1 "$python" -m pip install --disable-pip-version-check \
   --no-compile --no-deps --report "$root/INSTALL-REPORT.json" "$root/hermes[messaging,mcp,web]"
 "$python" -m pip check
 "$python" "$script_dir/bundle.py" prepare "$root"
+"$python" -I -B - <<'PY'
+import json
+from pathlib import Path
+import iollo_envelope
+from iollo_envelope.producer import Producer
+from gateway.platforms import api_server_runs
+
+catalog = Path(iollo_envelope.__file__).with_name("catalog.schema.json")
+assert json.loads(catalog.read_text())["$schema"]
+assert api_server_runs._iollo_envelope_installed
+producer = Producer("bundle_smoke_fake", surface="mac")
+producer.event({"event": "tool.started", "tool": "terminal", "preview": "echo fake"})
+partial = producer.revision()
+final = producer.revision(text="Ready.", status="final")
+assert partial["status"] == "partial" and final["status"] == "final"
+assert partial["message_id"] == final["message_id"] and final["rev"] > partial["rev"]
+PY
 cp "$script_dir/hermes-launcher.sh" "$root/bin/hermes"
 chmod +x "$root/bin/hermes"
 printf '%s\n' "$tag" > "$root/VERSION"

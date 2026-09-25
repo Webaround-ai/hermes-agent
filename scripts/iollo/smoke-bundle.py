@@ -49,6 +49,7 @@ def smoke(root):
         run([python, "-I", "-B", "-c", "import hermes_cli, run_agent, cli, agent, gateway, "
              "gateway.run, gateway.platforms.api_server, hermes_state, hermes_constants, "
              "model_tools, toolsets, tools, cron, tui_gateway, acp_adapter, plugins, providers; "
+             "import iollo_envelope.runtime, iollo_envelope.producer; "
              "import aiohttp, fastapi, uvicorn, mcp, telegram, discord, slack_bolt; "
              "from pathlib import Path; import sys; "
              "assert Path(run_agent.__file__).resolve().is_relative_to(Path(sys.prefix).parent); "
@@ -84,6 +85,15 @@ def smoke(root):
                     time.sleep(0.25)
                 else:
                     raise RuntimeError("Gateway did not answer /v1/models within 120 seconds")
+                for headers, expected in (({}, 401), ({"Authorization": f"Bearer {key}"}, 404)):
+                    probe = urllib.request.Request(f"http://127.0.0.1:{port}/v1/runs/fake/envelope",
+                                                   headers=headers)
+                    try:
+                        urllib.request.urlopen(probe, timeout=5)
+                    except urllib.error.HTTPError as error:
+                        assert error.code == expected, (error.code, expected)
+                    else:
+                        raise AssertionError(f"Envelope probe should return {expected}")
             except BaseException:
                 log.flush()
                 print(log_path.read_text(), file=sys.stderr)

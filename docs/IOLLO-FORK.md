@@ -88,6 +88,18 @@ GitHub release assets:
   iollo.minisign.pub                     # reference copy, NOT a trust anchor
 ```
 
+The shared reply producer is vendored unchanged under `iollo_envelope/`, with its
+source commit in `iollo_envelope/VENDORED`. Package discovery and catalog package
+data include it in both the Mac wheel and box image. The bounded install hook at
+the end of `gateway/platforms/api_server_runs.py` adds envelope SSE and inputs
+routes and enriches run status with the same locally stored envelope. It retains
+the existing runs authorization and callback seams. Mac callers may provide
+`envelope_context` with `surface: mac` and a public integer `conversation_id`.
+The producer uses `HERMES_HOME/state.db`; it does not import the control plane.
+The build and relocated smoke verify imports, catalog data, revision identity,
+and envelope route authentication. The scripted integration test is
+`tests/gateway/test_iollo_envelope_runtime.py`.
+
 The box uses the **unchanged root Dockerfile**, built from the tagged checkout,
 and pushes with `GITHUB_TOKEN` and job-scoped `packages: write`. It is **linux/amd64
 only**: Fly boxes do not need a multi-architecture image. `release.json.image` is

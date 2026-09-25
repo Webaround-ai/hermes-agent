@@ -17,7 +17,9 @@ they must not run upstream's installer/updater as their product update path.
   hook in `tools/approval_smart.py` (`register_rubric_provider`) that it uses; the additive
   runs-event trace fields documented in [IOLLO-RUN-TRACE.md](IOLLO-RUN-TRACE.md); and the
   vendored `iollo_envelope/` producer (see its `VENDORED` file) that the runs API serves as
-  envelope revisions.
+  envelope revisions; and one approval fix in `tools/approval_context.py`: an `api_server` session
+  with a registered approval listener (every `/v1/runs` run) counts as attended, so it asks instead of
+  refusing as an unattended platform.
 - The initial base is upstream **v2026.9.14**, package version **0.21.3**, commit
   **345cd2b057a452236de401d3534b8502a7465e8d** (the peeled annotated tag).
   The previously recorded **e10934b03e115b036b3c38b9c6e6817039a5962d** is a later

@@ -40,5 +40,9 @@ owner-box agent conversation persistence is unchanged.
   metadata has reached the producer, which must validate IDs against attachments in
   the same envelope revision (at most 50 IDs, each 1–128 characters). Never derive
   IDs from arbitrary tool output, paths or screenshot URLs.
+- Tool output never goes on the run stream. Upstream v2026.9.24 added a redacted
+  `preview` of the tool result to `tool.completed`; it stays in the code but is off
+  (`_EMIT_TOOL_COMPLETED_PREVIEW = False` in `api_server_runs.py`), because the
+  envelope producer maps event previews into trace detail.
 - Approval trace continues to come from the envelope prompt. No new approval event,
   transport frame or deployment is introduced here.

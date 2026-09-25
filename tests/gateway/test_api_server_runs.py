@@ -529,7 +529,11 @@ class TestRunStatus:
 
 class TestRunEvents:
     @pytest.mark.asyncio
-    async def test_tool_completed_event_includes_redacted_bounded_result_preview(self, adapter):
+    async def test_tool_completed_event_includes_redacted_bounded_result_preview(self, adapter, monkeypatch):
+        # Iollo keeps this upstream preview off by default (no tool output on the run
+        # stream); enable it here so upstream's redaction/bounding stays covered.
+        from gateway.platforms import api_server_runs
+        monkeypatch.setattr(api_server_runs, "_EMIT_TOOL_COMPLETED_PREVIEW", True)
         loop = asyncio.get_running_loop()
         adapter._run_streams["run_tool"] = asyncio.Queue()
         callback = adapter._make_run_event_callback("run_tool", loop)

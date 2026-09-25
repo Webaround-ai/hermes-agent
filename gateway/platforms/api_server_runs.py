@@ -95,6 +95,9 @@ _FIXED_EVENT_FIELDS = {
         "tool": tool, "duration": round(kw.get("duration", 0), 3), "error": kw.get("is_error", False)},
     "reasoning.available": lambda tool, preview, kw: {"text": preview or ""}}
 _TOOL_COMPLETED_PREVIEW_MAX_CHARS = 500
+# Iollo: tool output never goes on the public run stream (owner privacy rule; see
+# docs/IOLLO-RUN-TRACE.md). Upstream's redacted result preview stays in the code but off.
+_EMIT_TOOL_COMPLETED_PREVIEW = False
 
 
 def _tool_completed_preview(result: Any, redact_sensitive_text: Callable[..., str]) -> str:
@@ -282,7 +285,7 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
         fields = _FIXED_EVENT_FIELDS.get(event_type)
         if fields is not None:
             event_fields = fields(tool_name, preview, kwargs)
-            if event_type == "tool.completed":
+            if event_type == "tool.completed" and _EMIT_TOOL_COMPLETED_PREVIEW:
                 event_fields["preview"] = _tool_completed_preview(
                     kwargs.get("result"), redact_sensitive_text)
             if event_type in {"tool.started", "tool.completed"}:

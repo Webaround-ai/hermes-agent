@@ -40,6 +40,7 @@ async def test_trace_pairs_are_additive_allowlisted_and_not_persisted(tmp_path, 
         assert events[0]["preview"] == "legacy preview"
         assert events[0]["args"] == {"url": "https://example.org/page"}
         assert events[1]["duration"] == 1.235 and events[1]["error"] is False
+        assert "preview" not in events[1]  # upstream's tool-output preview stays off
         assert events[1]["result_summary"] == {"url": "https://example.org/page", "title": "Title"}
         additive = {"tool_call_id", "working_dir", "args", "result_summary"}
         assert {k: v for k, v in events[0].items() if k not in additive} == {

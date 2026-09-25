@@ -165,7 +165,12 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
         # lifecycle boundaries must land so clients can observe delegate_task failures.
         fields = _FIXED_EVENT_FIELDS.get(event_type)
         if fields is not None:
-            _push(_run_event(run_id, event_type, **fields(tool_name, preview, kwargs)))
+            payload = fields(tool_name, preview, kwargs)
+            if event_type in {"tool.started", "tool.completed"}:
+                from gateway.platforms.api_server_run_trace import tool_trace_fields
+
+                payload.update(tool_trace_fields(event_type, tool_name, args, kwargs))
+            _push(_run_event(run_id, event_type, **payload))
         elif event_type in {"subagent.start", "subagent.complete"}:
             event = _run_event(run_id, event_type)
             if preview is not None:

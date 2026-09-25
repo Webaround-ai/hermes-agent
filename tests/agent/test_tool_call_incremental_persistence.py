@@ -338,6 +338,7 @@ def test_persistence_cause_resets_between_turns():
 # ---------------------------------------------------------------------------
 def test_execute_tool_calls_sequential_flushes_each_tool_result_before_next_dispatch():
     agent = _make_agent()
+    agent.tool_progress_callback = MagicMock()
     tool_calls = [
         _mock_tool_call(name="web_search", call_id="c1"),
         _mock_tool_call(name="web_search", call_id="c2"),
@@ -368,6 +369,12 @@ def test_execute_tool_calls_sequential_flushes_each_tool_result_before_next_disp
         ),
     ):
         agent._execute_tool_calls_sequential(assistant_message, messages, "task-1")
+
+    for event_type in ("tool.started", "tool.completed"):
+        progress_ids = [call.kwargs["tool_call_id"]
+                        for call in agent.tool_progress_callback.call_args_list
+                        if call.args[0] == event_type]
+        assert progress_ids == [tc.id for tc in tool_calls]
 
     # The mock proves we exercised the REAL sequential dispatch surface.
     assert disp.call_count == 2, "sequential path did not dispatch via handle_function_call"
@@ -575,6 +582,7 @@ def test_segmented_batch_stops_before_later_segment_after_persist_failure():
 # ---------------------------------------------------------------------------
 def test_execute_tool_calls_concurrent_flushes_each_tool_result_in_order():
     agent = _make_agent()
+    agent.tool_progress_callback = MagicMock()
     tool_calls = [
         _mock_tool_call(name="web_search", call_id="c1"),
         _mock_tool_call(name="web_search", call_id="c2"),
@@ -607,6 +615,12 @@ def test_execute_tool_calls_concurrent_flushes_each_tool_result_in_order():
         ),
     ):
         agent._execute_tool_calls_concurrent(assistant_message, messages, "task-1")
+
+    for event_type in ("tool.started", "tool.completed"):
+        progress_ids = [call.kwargs["tool_call_id"]
+                        for call in agent.tool_progress_callback.call_args_list
+                        if call.args[0] == event_type]
+        assert progress_ids == [tc.id for tc in tool_calls]
 
     # Proves the real concurrent dispatch surface was exercised.
     assert inv.call_count == 2, "concurrent path did not dispatch via _invoke_tool"

@@ -10,9 +10,9 @@ they must not run upstream's installer/updater as their product update path.
 ## Branches and the verified starting point
 
 - `main` tracks `NousResearch/hermes-agent:main`, without Iollo changes.
-- `iollo` is an upstream release tag plus our patches. There are no Hermes behavior
-  patches today; the additions here are distribution machinery only, isolated in
-  `scripts/iollo/`, this document, one workflow and its tests.
+- `iollo` is an upstream release tag plus our small, isolated patches. Distribution
+  machinery lives in `scripts/iollo/`, this document, one workflow and its tests.
+  The additive runs-event trace patch is documented in [IOLLO-RUN-TRACE.md](IOLLO-RUN-TRACE.md).
 - The initial base is upstream **v2026.9.14**, package version **0.21.3**, commit
   **345cd2b057a452236de401d3534b8502a7465e8d** (the peeled annotated tag).
   The previously recorded **e10934b03e115b036b3c38b9c6e6817039a5962d** is a later

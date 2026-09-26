@@ -5,10 +5,12 @@ Off unless ``delegation.escalate`` is configured (the tool is not even advertise
     delegation:
       tiers:
         opus_high: {model: anthropic/claude-opus-5.5, reasoning_effort: high}
+        fable: {model: anthropic/claude-fable-5.1, reasoning_effort: high}
       escalate:
-        tier: opus_high        # required, must name a delegation tier
-        max_per_task: 2        # per main-agent turn (default 2)
-        max_per_day: 10        # per profile per UTC day (default 10)
+        tiers: [opus_high, fable]  # required: level 0 = first call in a turn, level 1 = any later call
+                                   # (the last entry repeats); legacy `tier: opus_high` = a one-entry list
+        max_per_task: 2        # optional, per main-agent turn; unset = unlimited
+        max_per_day: 10        # optional, per profile per UTC day; unset = unlimited
         gate_timeout_ms: 5000  # deadline for the escalate_gate plugin hook (default 5000)
         max_iterations: 30     # advisor's own iteration budget (default 30)
 
@@ -32,8 +34,6 @@ logger = logging.getLogger(__name__)
 
 # Advisor toolsets: read-only by construction. Intersected with the parent's own toolsets.
 ESCALATE_READONLY_TOOLSETS = ("web", "search", "vision", "session_search")
-DEFAULT_MAX_PER_TASK = 2
-DEFAULT_MAX_PER_DAY = 10
 DEFAULT_GATE_TIMEOUT_MS = 5000
 DEFAULT_MAX_ITERATIONS = 30
 
@@ -49,8 +49,20 @@ def _int(raw: Any, default: int, floor: int = 0) -> int:
         return default
 
 
+def _cap(raw: Any) -> Optional[int]:
+    """An optional cap: unset/null/malformed = ``None`` (unlimited); a number >= 0 is enforced."""
+    if raw is None or raw == "" or isinstance(raw, bool):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring malformed delegation.escalate cap %r (treated as unlimited)", raw)
+        return None
+
+
 def escalate_config(cfg: Optional[dict] = None) -> Optional[Dict[str, Any]]:
-    """Normalized ``delegation.escalate`` or ``None`` (feature off: missing, malformed, or unknown tier)."""
+    """Normalized ``delegation.escalate`` or ``None`` (feature off: missing, malformed, or no known tier).
+    ``tiers`` is the ordered level list; unknown tier names are dropped."""
     if cfg is None:
         from tools.delegate_tool_config import _load_config
         cfg = _load_config()
@@ -58,13 +70,23 @@ def escalate_config(cfg: Optional[dict] = None) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
     from tools.delegate_tool_tiers import configured_tiers
-    tier = str(raw.get("tier") or "").strip()
-    if not tier or tier not in configured_tiers(cfg):
+    raw_tiers = raw.get("tiers")
+    if raw_tiers is None:
+        raw_tiers = [raw.get("tier")]
+    elif not isinstance(raw_tiers, (list, tuple)):
+        raw_tiers = [raw_tiers]
+    known = configured_tiers(cfg)
+    names = [str(t or "").strip() for t in raw_tiers]
+    tiers = [n for n in names if n in known]
+    if len(tiers) != len([n for n in names if n]):
+        logger.warning("delegation.escalate names tiers that are not configured: %s",
+                       [n for n in names if n and n not in known])
+    if not tiers:
         return None
     return {
-        "tier": tier,
-        "max_per_task": _int(raw.get("max_per_task"), DEFAULT_MAX_PER_TASK),
-        "max_per_day": _int(raw.get("max_per_day"), DEFAULT_MAX_PER_DAY),
+        "tiers": tiers,
+        "max_per_task": _cap(raw.get("max_per_task")),
+        "max_per_day": _cap(raw.get("max_per_day")),
         "gate_timeout_ms": _int(raw.get("gate_timeout_ms"), DEFAULT_GATE_TIMEOUT_MS),
         "max_iterations": _int(raw.get("max_iterations"), DEFAULT_MAX_ITERATIONS, floor=1),
     }
@@ -117,17 +139,18 @@ def usage(parent_agent) -> Tuple[int, int]:
         return _task_counts.get(_task_key(parent_agent), 0), _read_day_count()
 
 
-def _reserve(parent_agent, esc: Dict[str, Any]) -> Optional[str]:
-    """Count one escalation, or return the refusal text when a cap is reached (nothing counted)."""
+def _reserve(parent_agent, esc: Dict[str, Any]) -> Tuple[Optional[str], int]:
+    """Count one escalation and return ``(None, level)`` (level = escalations already made this turn), or
+    ``(refusal text, level)`` when a configured cap is reached (nothing counted). Unset caps never refuse."""
     key = _task_key(parent_agent)
     with _lock:
         used_task, used_day = _task_counts.get(key, 0), _read_day_count()
-        if used_task >= esc["max_per_task"]:
+        if esc["max_per_task"] is not None and used_task >= esc["max_per_task"]:
             return (f"Escalation limit for this task reached ({used_task}/{esc['max_per_task']}). "
-                    "Continue with your own best judgment, or tell the user what you are unsure about.")
-        if used_day >= esc["max_per_day"]:
+                    "Continue with your own best judgment, or tell the user what you are unsure about."), used_task
+        if esc["max_per_day"] is not None and used_day >= esc["max_per_day"]:
             return (f"Daily escalation limit reached ({used_day}/{esc['max_per_day']}). "
-                    "Continue with your own best judgment, or tell the user what you are unsure about.")
+                    "Continue with your own best judgment, or tell the user what you are unsure about."), used_task
         _task_counts[key] = used_task + 1
         _task_counts.move_to_end(key)
         while len(_task_counts) > _TASK_COUNT_LIMIT:
@@ -136,7 +159,13 @@ def _reserve(parent_agent, esc: Dict[str, Any]) -> Optional[str]:
             _write_day_count(used_day + 1)
         except OSError:
             logger.warning("escalate: could not persist the daily counter", exc_info=True)
-    return None
+    return None, used_task
+
+
+def level_tier(esc: Dict[str, Any], level: int) -> str:
+    """Tier for escalation *level* (0 = first call in the turn); the last entry repeats."""
+    tiers = esc["tiers"]
+    return tiers[min(max(0, level), len(tiers) - 1)]
 
 
 def _refund(parent_agent) -> None:
@@ -169,14 +198,14 @@ def _gate_answer(answer: Any) -> Optional[Tuple[str, str]]:
     return (action, reason) if action in ("escalate", "continue") else None
 
 
-def _ask_gate(esc: Dict[str, Any], model: str, parent_agent, *, question: str, context: str, constraints: str,
-              wanted: str) -> Optional[Tuple[str, str]]:
+def _ask_gate(esc: Dict[str, Any], tier: str, level: int, model: str, parent_agent, *, question: str, context: str,
+              constraints: str, wanted: str) -> Optional[Tuple[str, str]]:
     from hermes_cli.plugin_choices import first_plugin_choice
-    used_task, used_day = usage(parent_agent)
+    used_task, used_day = usage(parent_agent)  # already includes this call's reservation
     return first_plugin_choice(
         "escalate_gate", timeout_s=esc["gate_timeout_ms"] / 1000.0, accept=_gate_answer,
         question=question, context=context, constraints=constraints, wanted=wanted,
-        tier=esc["tier"], model=model, used_this_task=used_task, used_today=used_day,
+        tier=tier, level=level, model=model, used_this_task=used_task, used_today=used_day,
         max_per_task=esc["max_per_task"], max_per_day=esc["max_per_day"],
         session_id=getattr(parent_agent, "session_id", None),
         turn_id=getattr(parent_agent, "_current_turn_id", None),
@@ -227,16 +256,21 @@ def escalate(question: str = "", context: str = "", constraints: str = "", wante
     from tools.delegate_tool_tiers import build_task_routes, route_summary
     try:
         base_creds = _resolve_delegation_credentials(cfg, parent_agent)
-        route = build_task_routes([{"goal": question, "tier": esc["tier"]}], cfg, base_creds)[0]
     except ValueError as exc:
         return tool_error(str(exc))
 
     # Caps first, in code: a gate can refuse an escalation but never allow one past a cap.
-    refusal = _reserve(parent_agent, esc)
+    refusal, level = _reserve(parent_agent, esc)
     if refusal:
         return json.dumps({"escalated": False, "reason": refusal}, ensure_ascii=False)
+    tier = level_tier(esc, level)
     try:
-        verdict = _ask_gate(esc, route["model"], parent_agent, question=question, context=context,
+        route = build_task_routes([{"goal": question, "tier": tier}], cfg, base_creds)[0]
+    except ValueError as exc:
+        _refund(parent_agent)
+        return tool_error(str(exc))
+    try:
+        verdict = _ask_gate(esc, tier, level, route["model"], parent_agent, question=question, context=context,
                             constraints=constraints, wanted=wanted)
     except Exception:
         verdict = None
@@ -255,6 +289,7 @@ def escalate(question: str = "", context: str = "", constraints: str = "", wante
     entry = (result.get("results") or [{}])[0]
     out: Dict[str, Any] = {
         "escalated": True, "status": entry.get("status"), "advice": entry.get("summary") or "",
+        "advised_by": route["model"], "level": level,
         **{k: v for k, v in (route_summary(route, 0) or {}).items() if k in ("tier", "model", "reasoning_effort")},
     }
     if entry.get("error"):
@@ -262,7 +297,7 @@ def escalate(question: str = "", context: str = "", constraints: str = "", wante
     for key in ("cost_usd", "duration_seconds"):
         if key in entry:
             out[key] = entry[key]
-    out["note"] = "Advice only: nothing was changed. Apply it yourself if you agree."
+    out["note"] = f"Advice from {route['model']} (level {level}), advice only: nothing was changed. Apply it yourself if you agree."
     return json.dumps(out, ensure_ascii=False)
 
 

@@ -175,3 +175,66 @@ def test_advisor_runs_read_only_on_the_tier_model_and_effort(monkeypatch):
     prompt = kwargs["ephemeral_system_prompt"]
     for part in ARGS.values():
         assert part in prompt
+
+
+# ── levels and optional caps (owner decisions, PR #11) ─────────────────────
+
+LEVELS = {
+    "tiers": {**CFG["tiers"], "fable": {"model": "anthropic/claude-fable-5.1", "reasoning_effort": "high"}},
+    "escalate": {"tiers": ["opus_high", "fable"]},
+}
+
+
+def test_first_call_in_a_turn_uses_level_0_and_later_calls_level_1(monkeypatch):
+    _use_cfg(monkeypatch, LEVELS)
+    calls = _fake_advisor(monkeypatch)
+    levels = []
+    _install_gate(monkeypatch, lambda level, tier, **_: levels.append((level, tier)) or None)
+    turn = _parent("turn-1")
+    outs = [json.loads(et.escalate(**ARGS, parent_agent=turn)) for _ in range(3)]
+    assert [o["advised_by"] for o in outs] == ["anthropic/claude-opus-5.5", "anthropic/claude-fable-5.1",
+                                               "anthropic/claude-fable-5.1"]
+    assert [o["level"] for o in outs] == [0, 1, 2]
+    assert "anthropic/claude-opus-5.5" in outs[0]["note"]
+    assert levels == [(0, "opus_high"), (1, "fable"), (2, "fable")]
+    assert [c["model"] for c in calls] == [o["advised_by"] for o in outs]
+    # A new turn starts again at level 0.
+    assert json.loads(et.escalate(**ARGS, parent_agent=_parent("turn-2")))["tier"] == "opus_high"
+
+
+def test_a_declined_escalation_does_not_raise_the_level(monkeypatch):
+    _use_cfg(monkeypatch, LEVELS)
+    _fake_advisor(monkeypatch)
+    answers = iter(["continue", "escalate"])
+    _install_gate(monkeypatch, lambda **_: next(answers))
+    turn = _parent("turn-1")
+    assert json.loads(et.escalate(**ARGS, parent_agent=turn))["escalated"] is False
+    assert json.loads(et.escalate(**ARGS, parent_agent=turn))["tier"] == "opus_high"
+
+
+def test_legacy_single_tier_key_is_a_one_level_list(monkeypatch):
+    _use_cfg(monkeypatch, CFG)
+    assert et.escalate_config()["tiers"] == ["opus_high"]
+    _fake_advisor(monkeypatch)
+    turn = _parent("turn-1")
+    outs = [json.loads(et.escalate(**ARGS, parent_agent=turn)) for _ in range(2)]
+    assert [o["tier"] for o in outs] == ["opus_high", "opus_high"]
+
+
+def test_no_caps_by_default(monkeypatch):
+    _use_cfg(monkeypatch, LEVELS)
+    esc = et.escalate_config()
+    assert (esc["max_per_task"], esc["max_per_day"]) == (None, None)
+    calls = _fake_advisor(monkeypatch)
+    turn = _parent("turn-1")
+    outs = [json.loads(et.escalate(**ARGS, parent_agent=turn)) for _ in range(12)]
+    assert all(o["escalated"] for o in outs) and len(calls) == 12
+
+
+def test_caps_still_enforced_when_set_alongside_levels(monkeypatch):
+    _use_cfg(monkeypatch, {**LEVELS, "escalate": {"tiers": ["opus_high", "fable"], "max_per_task": 1}})
+    _fake_advisor(monkeypatch)
+    turn = _parent("turn-1")
+    assert json.loads(et.escalate(**ARGS, parent_agent=turn))["escalated"] is True
+    refused = json.loads(et.escalate(**ARGS, parent_agent=turn))
+    assert refused["escalated"] is False and "this task" in refused["reason"]

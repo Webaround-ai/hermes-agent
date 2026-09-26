@@ -533,6 +533,22 @@ def _is_recoverable_local_backend_failure(session_info: Dict[str, Any], result: 
     return result.get("returncode") is not None and not result.get("success")
 
 
+# agent-browser's own errors when its daemon's CDP link died under it (the browser behind a
+# user-supplied endpoint restarted). The daemon keeps the dead link, so every later command fails.
+_DEAD_CDP_LINK_MARKERS = ("channel closed", "connection closed", "auto-launch failed")
+
+
+def _is_dead_cdp_link_failure(session_info: Dict[str, Any], result: Dict[str, Any]) -> bool:
+    """True when a command on a user-supplied CDP endpoint session failed because the daemon's link to
+    the browser is dead. The endpoint (``cdp_url``) still stands for a live browser — it may simply be a
+    new process behind the same URL — so a fresh daemon generation reconnects. Cloud sessions
+    (``bb_session_id``) are excluded: their endpoint dies with the cloud session."""
+    if not session_info.get("cdp_url") or session_info.get("bb_session_id") or result.get("success"):
+        return False
+    error = str(result.get("error") or "").lower()
+    return any(marker in error for marker in _DEAD_CDP_LINK_MARKERS)
+
+
 def _interpret_browser_command_output(command: str, stdout: str, stderr: str, returncode: int) -> Dict[str, Any]:
     """Finished agent-browser process output → result dict. Empty stdout with rc=0 is a
     broken state (stale daemon) reported as failure except for ``_EMPTY_OK_COMMANDS``;
@@ -791,6 +807,14 @@ def _run_browser_command(
                                "and retrying once", command, task_id, result.get("returncode"))
             _recycle_local_session(task_id, session_info, _prepare_session_socket_dir(session_info["session_name"]),
                                    f"agent-browser '{command}' exited {result.get('returncode')}")
+            continue
+        # Same for a CDP endpoint session whose daemon lost its browser link: drop that daemon
+        # generation (as a CDP timeout does) and reconnect once to the same cdp_url.
+        if attempt == 0 and command != "close" and _is_dead_cdp_link_failure(session_info, result):
+            _bt.logger.warning("browser '%s' lost its CDP link (task=%s); reconnecting to the same endpoint "
+                               "and retrying once", command, task_id)
+            _discard_timed_out_browser_session(task_id, session_info,
+                                               _prepare_session_socket_dir(session_info["session_name"]))
             continue
         break
 

@@ -178,6 +178,12 @@ def _build_child_agent(
     routing_cfg: Optional[Dict[str, Any]] = None,
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
+    # Per-child route facts from a delegation tier (tools/delegate_tool_tiers.py); None = today's behaviour.
+    reasoning_effort: Any = None,
+    tier: Optional[str] = None,
+    # Advice-only children (the escalate tool): the child keeps ONLY these toolsets (intersected with the
+    # parent's), never delegates, and runs as a leaf regardless of depth.
+    readonly_toolsets: Optional[List[str]] = None,
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair."""
@@ -189,6 +195,8 @@ def _build_child_agent(
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
     max_spawn = _get_max_spawn_depth()
     effective_role = "orchestrator" if _get_orchestrator_enabled() and child_depth < max_spawn else "leaf"
+    if readonly_toolsets is not None:
+        effective_role = "leaf"
 
     # One subagent_id shared by the progress callback, spawn_requested event and
     # the live registry; parent_id is set when THIS parent is itself a subagent.
@@ -200,6 +208,10 @@ def _build_child_agent(
     # as auxiliary.review.
     delegation_cfg = _load_config()
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
+    if readonly_toolsets is not None:
+        allowed = set(readonly_toolsets)
+        child_toolsets = [t for t in child_toolsets if t in allowed]
+        child_disabled_toolsets = list(dict.fromkeys(child_disabled_toolsets + ["delegation"]))
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=_resolve_workspace_hint(parent_agent), role=effective_role,
         max_spawn_depth=max_spawn, child_depth=child_depth,
@@ -211,6 +223,11 @@ def _build_child_agent(
     # Shared ref: session_id once the child exists, delegation_id once
     # delegate_task stamps it — both ride on every relayed event.
     child_session_ref: Dict[str, Any] = {}
+    if tier:
+        child_session_ref["tier"] = tier
+    if reasoning_effort is not None:
+        from tools.delegate_tool_tiers import effort_label
+        child_session_ref["reasoning_effort"] = effort_label(reasoning_effort)
     child_progress_cb = _build_child_progress_callback(
         task_index, goal, parent_agent, task_count, subagent_id=subagent_id, parent_id=parent_subagent_id,
         depth=max(0, child_depth - 1),  # 0 = first-level child for the UI
@@ -221,7 +238,7 @@ def _build_child_agent(
         override_base_url=override_base_url, override_api_key=override_api_key, override_api_mode=override_api_mode,
         override_acp_command=override_acp_command,
         override_acp_args=override_acp_args,
-        routing_cfg=routing_cfg,
+        routing_cfg=routing_cfg, reasoning_effort=reasoning_effort,
     )
     if override_request_overrides is not None:
         # honored whenever set, incl. the inherit branch where
@@ -263,6 +280,9 @@ def _build_child_agent(
     child_session_ref["session_id"] = getattr(child, "session_id", "") or ""
     child._progress_identity_ref = child_session_ref
     child._delegate_depth, child._delegate_role = child_depth, effective_role  # post-degrade role
+    if tier or reasoning_effort is not None:
+        child._delegate_tier = tier
+        child._delegate_reasoning_effort = child_session_ref.get("reasoning_effort")
     child._subagent_id, child._parent_subagent_id = subagent_id, parent_subagent_id
     _apply_child_compression_cap(child, delegation_cfg)
     # Ownership chain for action=list/steer/stop; weakref so a finished parent
@@ -366,21 +386,31 @@ def _build_children(
     task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
     live_deleg_id: Optional[str], live_writers: list, task_images: Optional[List[Optional[List[str]]]] = None,
+    task_routes: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> tuple[List[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe);
-    ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
+    ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure. ``task_routes`` (from
+    ``delegate_tool_tiers.build_task_routes``) gives a child its own credential bundle, model and effort."""
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
-    overrides = {
-        "override_provider": creds["provider"], "override_base_url": creds["base_url"],
-        "override_api_key": creds["api_key"], "override_api_mode": creds["api_mode"],
-        "override_request_overrides": creds.get("request_overrides"),
-        "override_acp_command": creds.get("command"),
-        "override_acp_args": creds.get("args"),
-        "routing_cfg": routing_cfg,
-    }
+
+    def _overrides(c: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "override_provider": c["provider"], "override_base_url": c["base_url"],
+            "override_api_key": c["api_key"], "override_api_mode": c["api_mode"],
+            "override_request_overrides": c.get("request_overrides"),
+            "override_acp_command": c.get("command"),
+            "override_acp_args": c.get("args"),
+            "routing_cfg": routing_cfg,
+        }
+    overrides = _overrides(creds)
     children = []
     for i, t in enumerate(task_list):
+        route = task_routes[i] if task_routes and i < len(task_routes) else None
+        route_kwargs: Dict[str, Any] = {}
+        if route:
+            route_kwargs = {**_overrides(route["creds"]), "model": route["model"],
+                            "reasoning_effort": route.get("reasoning_effort"), "tier": route.get("tier")}
         _task_schema = task_schemas[i] if i < len(task_schemas) else None
         _child_context = t.get("context")
         if _task_schema is not None:
@@ -389,8 +419,9 @@ def _build_children(
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
+                max_iterations=max_iterations, task_count=len(task_list),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
+                **{"model": creds["model"], **overrides, **route_kwargs},
             )
         except ValueError as exc:
             return [], str(exc)
@@ -408,6 +439,10 @@ def _build_children(
         if _writer is not None:
             child.tool_progress_callback = wrap_progress_callback(getattr(child, "tool_progress_callback", None), _writer)
             child._live_transcript_path = str(_writer.path)
+            if route:
+                from tools.delegate_tool_tiers import effort_label
+                _writer.event("route", f"tier={route.get('tier') or '-'} ({route.get('source')}) model={route['model']} "
+                                       f"effort={effort_label(route.get('reasoning_effort')) or 'inherited'}")
         if live_deleg_id:
             setattr(child, "_delegation_id", live_deleg_id)
             _ident_ref = getattr(child, "_progress_identity_ref", None)
@@ -505,6 +540,15 @@ def delegate_task(
         task_images, err = _coerce_task_images(task_list, images)
     if err:
         return tool_error(err)
+    # Tiers apply to the ordinary delegation route only; an internal per-call route (/review) keeps its own.
+    try:
+        from tools.delegate_tool_tiers import build_task_routes
+        task_routes = build_task_routes(
+            task_list, cfg if credentials_cfg is None else None, creds, context=context,
+            parent_session_id=getattr(parent_agent, "session_id", None),
+        )
+    except ValueError as exc:
+        return tool_error(str(exc))
     err = _oneshot_spawn_budget(parent_agent, len(task_list))
     if err:
         return tool_error(err)
@@ -513,8 +557,11 @@ def delegate_task(
     # Live transcripts: cache/delegation/live/<id>/task-<n>.log per task, a side channel with zero effect on message
     # content or prompt caching. Best-effort: on failure live_paths is empty and delegation proceeds.
     from tools.delegation_live_log import create_live_transcripts
+    from tools.delegate_tool_tiers import route_summary
+    task_route_facts = [route_summary(r, i) for i, r in enumerate(task_routes)]
     live_deleg_id, live_writers, live_paths = create_live_transcripts(
-        task_list, context, model=creds.get("model"), provider=creds.get("provider")
+        task_list, context, model=creds.get("model"), provider=creds.get("provider"),
+        task_routes=task_route_facts if any(task_route_facts) else None,
     )
     _announce_batch(parent_agent, len(task_list), live_deleg_id)
     origin = _capture_origin()
@@ -522,12 +569,14 @@ def delegate_task(
     children, err = _build_children(
         task_list, task_schemas, creds, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
         routing_cfg=routing_cfg, live_deleg_id=live_deleg_id, live_writers=live_writers, task_images=task_images,
+        task_routes=task_routes,
     )
     if err:
         return tool_error(err)
     batch = _Batch(
         task_list, children, parent_agent, creds, context, top_role, max_children,
         live_deleg_id, live_writers, live_paths, *origin, overall_start,
+        task_routes=task_route_facts if any(task_route_facts) else None,
     )
     return _run_batch(batch, background)
 
@@ -622,6 +671,12 @@ def _build_dynamic_schema_overrides() -> dict:
         tasks["items"] = {**tasks["items"], "properties": {
             k: v for k, v in tasks["items"]["properties"].items() if k != "group"
         }}
+    # `tier` exists in the schema only when delegation.tiers is configured.
+    from tools.delegate_tool_tiers import tier_schema_property
+    tier_prop = tier_schema_property(_load_config())
+    if tier_prop is not None:
+        tasks = overrides_params["properties"]["tasks"]
+        tasks["items"] = {**tasks["items"], "properties": {**tasks["items"]["properties"], "tier": tier_prop}}
 
     return {
         "description": _build_top_level_description(independent_completions=independent_completions),
@@ -725,7 +780,8 @@ def _model_background_value(args: dict, parent_agent=None) -> bool:
     the intercept is bypassed. Direct Python callers keep the synchronous default."""
     return not getattr(parent_agent, "_delegate_depth", 0) > 0
 
-_MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}
+# ``model`` is trusted-caller only: the model picks among configured tiers, never an arbitrary model.
+_MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args", "model"}
 
 def _strip_model_hidden_task_fields(tasks: Any) -> Any:
     """Drop trusted-config-only task fields from model-supplied tasks (same list object back when nothing changed)."""

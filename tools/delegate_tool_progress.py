@@ -320,7 +320,8 @@ class _ChildProgressRelay:
             kw["toolsets"] = list(self.toolsets)
         # child_session_id / delegation_id are filled into the shared ref once
         # the child exists, so every relayed event lets UIs open its session.
-        for src, dst in (("session_id", "child_session_id"), ("delegation_id", "delegation_id")):
+        for src, dst in (("session_id", "child_session_id"), ("delegation_id", "delegation_id"),
+                         ("tier", "tier"), ("reasoning_effort", "reasoning_effort")):
             if self.session_ref.get(src):
                 kw[dst] = str(self.session_ref[src])
         kw["tool_count"] = self.tool_count
@@ -347,7 +348,9 @@ class _ChildProgressRelay:
     # ── Lifecycle events emitted by the orchestrator itself ──
     def _on_start(self, tool_name, preview, args, kwargs):
         if self.goal_label:
-            self._tree_line(f"🔀 {_short(self.goal_label, 55)}")
+            tier = self.session_ref.get("tier")
+            tag = f" [{tier}]" if tier else ""
+            self._tree_line(f"🔀 {_short(self.goal_label, 55)}{tag}")
         self._relay("subagent.start", preview=preview or self.goal_label or "", **kwargs)
 
     def _on_complete(self, tool_name, preview, args, kwargs):

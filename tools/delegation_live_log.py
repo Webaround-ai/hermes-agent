@@ -227,7 +227,7 @@ def wrap_progress_callback(inner_cb, writer: LiveTranscriptWriter):
 def create_live_transcripts(
     task_list: List[Dict[str, Any]], context: Optional[str] = None,
     delegation_id: Optional[str] = None, model: Optional[str] = None,
-    provider: Optional[str] = None,
+    provider: Optional[str] = None, task_routes: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> tuple[Optional[str], List[Optional[LiveTranscriptWriter]], List[str]]:
     """One pre-headered writer per task + a manifest.json; prunes stale dirs.
     Returns ``(delegation_id, writers, paths)``; on any top-level failure
@@ -243,7 +243,7 @@ def create_live_transcripts(
         paths: List[str] = [str(w.path) for w in made if w.path is not None]
         if not paths:
             return None, [None] * n, []
-        _write_manifest(deleg_id, task_list, paths, model=model, provider=provider)
+        _write_manifest(deleg_id, task_list, paths, model=model, provider=provider, task_routes=task_routes)
         return deleg_id, writers, paths
     return None, [None] * n, []
 
@@ -254,7 +254,12 @@ def _manifest_path(delegation_id: str) -> Path:
 
 def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                     paths: List[str], model: Optional[str] = None,
-                    provider: Optional[str] = None) -> None:
+                    provider: Optional[str] = None,
+                    task_routes: Optional[List[Optional[Dict[str, Any]]]] = None) -> None:
+    def _route(i: int) -> Dict[str, Any]:
+        r = task_routes[i] if task_routes and i < len(task_routes) else None
+        return {k: r.get(k) for k in ("tier", "model", "reasoning_effort")} if r else {}
+
     with _best_effort("manifest write"):
         _dump_json(_manifest_path(delegation_id), {
             "delegation_id": delegation_id, "started": time.strftime(_TIME_FMT),
@@ -264,6 +269,7 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                 # Same mounted dir as the .log files, so the goal needs the same redaction.
                 "goal": _redact(str(t.get("goal", ""))[:500]),
                 "log": paths[i] if i < len(paths) else None,
+                **_route(i),
                 "status": "running"} for i, t in enumerate(task_list)]})
 
 

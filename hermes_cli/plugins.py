@@ -201,6 +201,23 @@ VALID_HOOKS: Set[str] = {
     # IGNORED in v1 — a plugin returning a directive-shaped dict gets a debug log so future block/rewrite
     # adopters are discoverable once the middleware variant ships against the #64231 taxonomy.
     "pre_command",
+    # Chooser hooks (hermes_cli/plugin_choices.py): consulted only when a plugin registers them,
+    # under a hard deadline; first accepted non-None answer wins; None, an invalid answer, an
+    # exception or a timeout all mean "the configured default".
+    # delegation_tier_chooser: per delegate_task child that has neither `model` nor `tier`, only
+    # when delegation.tiers is set. Kwargs: goal, context, task_index, task_count, tiers (dict
+    # name -> {model, provider, reasoning_effort}), default_tier, parent_session_id. Return a
+    # tier name. Deadline delegation.tier_chooser_timeout_ms (default 3000).
+    # escalate_gate: before each `escalate` dispatch (caps are checked first, in code). Kwargs:
+    # question, context, constraints, wanted, tier, model, used_this_task, used_today,
+    # max_per_task, max_per_day, session_id, turn_id. Return "escalate" | "continue" or
+    # {"action": "escalate"|"continue", "reason": str}; the reason of a "continue" reaches the
+    # agent. Deadline delegation.escalate.gate_timeout_ms (default 5000).
+    # busy_input_chooser: per message arriving while a gateway turn runs. Kwargs: text,
+    # configured_mode, running_goal, elapsed_seconds, session_key, platform. Return
+    # "append" (= steer) | "steer" | "interrupt" | "queue". Hard deadline 400 ms. The existing
+    # interrupt->queue demotions (active subagents, compression in flight) keep priority.
+    "delegation_tier_chooser", "escalate_gate", "busy_input_chooser",
 }
 
 # Hooks whose directive the shell-hook response parser has no channel for. VALID_HOOKS doubles as

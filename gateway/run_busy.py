@@ -559,8 +559,10 @@ class GatewayBusySessionMixin:
     async def _resolve_busy_steer_or_redirect(
         self, event: MessageEvent, session_key: str, effective_mode: str, running_agent: Any
     ) -> "GatewayRunner._BusySteerOutcome":
-        """Apply interrupt->queue demotions, then attempt steer (steer mode) or redirect (interrupt mode)."""
+        """Consult the busy_input_chooser plugin hook, apply interrupt->queue demotions (they win over the
+        chooser), then attempt steer (steer mode) or redirect (interrupt mode)."""
         from gateway.run import _AGENT_PENDING_SENTINEL
+        effective_mode = await self._consult_busy_input_chooser(event, session_key, effective_mode)
         # Steer injects mid-run via running_agent.steer(), falling back to queue (nothing lost) when
         # the agent isn't running yet, lacks steer(), or the payload is empty. Interrupt is demoted
         # to queue while subagents run (interrupt() would abort them); /stop and /new still cancel all.
@@ -607,6 +609,42 @@ class GatewayBusySessionMixin:
             effective_mode=effective_mode, demoted_for_subagents=demoted_for_subagents,
             demoted_for_compression=demoted_for_compression, steered=steered, redirected=redirected,
         )
+
+    # busy_input_chooser answers; "append" adds the text to the running turn, which is what steer does.
+    _BUSY_CHOOSER_MODES = {"append": "steer", "steer": "steer", "interrupt": "interrupt", "queue": "queue"}
+    _BUSY_CHOOSER_TIMEOUT_S = 0.4
+
+    async def _consult_busy_input_chooser(self, event: MessageEvent, session_key: str, configured_mode: str) -> str:
+        """Per-message mode from the ``busy_input_chooser`` hook, else *configured_mode*. No plugin -> no work;
+        a slow (> 400 ms), raising or off-list answer -> *configured_mode*. Demotions are applied afterwards."""
+        try:
+            from hermes_cli import plugins
+            if not plugins.has_hook("busy_input_chooser"):
+                return configured_mode
+        except Exception:
+            return configured_mode
+        from hermes_cli.plugin_choices import first_plugin_choice
+        state = self._peek_session_state(session_key)
+        turn = state.turn if state else None
+        opener = getattr(turn, "event", None) if turn else None
+        started = getattr(turn, "started_ts", 0.0) if turn else 0.0
+        modes = self._BUSY_CHOOSER_MODES
+        try:
+            choice = await asyncio.to_thread(
+                first_plugin_choice, "busy_input_chooser", timeout_s=self._BUSY_CHOOSER_TIMEOUT_S,
+                accept=lambda a: modes.get(a.strip().lower()) if isinstance(a, str) else None,
+                text=(event.text or ""), configured_mode=configured_mode,
+                running_goal=str(getattr(opener, "text", "") or "")[:2000],
+                elapsed_seconds=round(time.time() - started, 1) if started else None,
+                session_key=session_key,
+                platform=getattr(getattr(event.source, "platform", None), "value", None),
+            )
+        except Exception:
+            logger.debug("busy_input_chooser failed for session %s", session_key, exc_info=True)
+            choice = None
+        if choice and choice != configured_mode:
+            logger.info("busy_input_chooser: session %s mode %s -> %s", session_key, configured_mode, choice)
+        return choice or configured_mode
 
     @staticmethod
     def _demote_interrupt(session_key: str, why: str) -> str:

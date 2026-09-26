@@ -48,6 +48,25 @@ class _Batch:
     # Set on per-group units carved out by ``_dispatch_background``; None for the whole batch / ungrouped units.
     group: Optional[str] = None
     unit_id: Optional[str] = None  # the async registry id this unit runs under (``<call_id>-k`` for split calls)
+    # Per-task tier facts (``delegate_tool_tiers.route_summary``; None entries = ordinary route); None = tiers unused.
+    task_routes: Optional[List[Optional[Dict[str, Any]]]] = None
+
+    def unit_route_facts(self) -> Optional[List[Dict[str, Any]]]:
+        """This unit's tier facts (only its own tasks), or None when no task in it took a tier/explicit model."""
+        if not self.task_routes:
+            return None
+        facts = [self.task_routes[i] for (i, _, _) in self.children
+                 if i < len(self.task_routes) and self.task_routes[i]]
+        return facts or None
+
+    def unit_model(self) -> Optional[str]:
+        """The model to record for this unit: the routed model when every task in it shares one, else the call's."""
+        facts = self.unit_route_facts()
+        if facts and len(facts) == len(self.children):
+            models = {f.get("model") for f in facts}
+            if len(models) == 1:
+                return models.pop()
+        return self.creds["model"]
 
     def owner_kwargs(self) -> Dict[str, Any]:
         """Steer/stop authority of the originating session, passed to every child run."""
@@ -394,7 +413,7 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
         # Call-wide goals: completion formatting indexes them by task_index.
         goals=[t["goal"] for t in unit.task_list], context=unit.context,
         toolsets=None,  # metadata for the completion block only; subagents inherit the parent's toolsets
-        role=unit.top_role, model=unit.creds["model"],
+        role=unit.top_role, model=unit.unit_model(), tiers=unit.unit_route_facts(),
         runner=lambda: _execute_and_aggregate(unit, honor_parent_interrupt=False),
         interrupt_fn=_interrupt, delegation_id=unit_id, slot_key=slot_key,
         task_indexes=[i for (i, _, _) in unit.children] if len(unit.children) < len(unit.task_list) else None,

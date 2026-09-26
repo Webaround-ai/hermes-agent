@@ -19,10 +19,14 @@ they must not run upstream's installer/updater as their product update path.
   vendored `iollo_envelope/` producer (see its `VENDORED` file) that the runs API serves as
   envelope revisions; and one approval fix in `tools/approval_context.py`: an `api_server` session
   with a registered approval listener (every `/v1/runs` run) counts as attended, so it asks instead of
-  refusing as an unattended platform; and one browser fix in `tools/browser_tool_session.py`
+  refusing as an unattended platform; one browser fix in `tools/browser_tool_session.py`
   (upstream candidate): a CDP-endpoint session whose agent-browser daemon lost its browser link
   ("CDP response channel closed", e.g. the browser behind `browser.cdp_url` restarted) drops that
-  daemon generation and retries once against the same URL, as a CDP timeout already does.
+  daemon generation and retries once against the same URL, as a CDP timeout already does; and fork
+  brief 041, all off unless configured: `delegation.tiers` / `default_tier` / `tier_chooser_timeout_ms`
+  (per-child model + reasoning effort for `delegate_task`, `tools/delegate_tool_tiers.py`), the
+  advice-only `escalate` tool behind `delegation.escalate` (`tools/escalate_tool.py`), and three chooser
+  hooks (`delegation_tier_chooser`, `escalate_gate`, `busy_input_chooser`; `hermes_cli/plugin_choices.py`).
 - The current base is upstream **v2026.9.24**, package version **0.21.5**, commit
   **f97608f178d1ffeca59860195ab7da295f7c8e5f** (the peeled annotated tag), rebased from
   v2026.9.14 (0.21.3) on 2026-09-25. That rebase tagged on targeted tests only (owner's call);

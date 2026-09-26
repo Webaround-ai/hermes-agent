@@ -596,6 +596,10 @@ def _build_result_entry(
         "api_calls": result.get("api_calls", 0),
         "duration_seconds": duration,
         "model": _str_or_none(getattr(child, "model", None)),
+        # Only children built from a delegation tier carry these (absent otherwise).
+        **({"tier": _str_or_none(child.__dict__.get("_delegate_tier")),
+            "reasoning_effort": _str_or_none(child.__dict__.get("_delegate_reasoning_effort"))}
+           if "_delegate_reasoning_effort" in getattr(child, "__dict__", {}) else {}),
         "exit_reason": exit_reason,
         # A budget-exhausted child still returns a summary (status stays
         # "completed"), so the parent needs this explicit flag.

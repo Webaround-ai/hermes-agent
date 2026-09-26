@@ -326,3 +326,63 @@ class TestBackendLevelFailureRecycles:
         assert len(spawns) == 1  # no retry
         assert bt._active_sessions[TASK] is session_info  # cache untouched
         assert bt._suspect_browser_sessions == {}
+
+
+class TestDeadCdpLinkReconnects:
+    """A user-supplied CDP endpoint whose browser was replaced (same URL, new process): the session's
+    agent-browser daemon keeps its dead link and answers every command with a parsed error. The first
+    such failure must drop that daemon generation and retry once against the same cdp_url."""
+
+    CDP = "http://127.0.0.1:8080/t/fake-token"
+    DEAD = json.dumps({"success": False, "error": "Auto-launch failed: CDP response channel closed"}).encode()
+
+    def _cdp_session(self, name="cdp_stale"):
+        return {"session_name": name, "bb_session_id": None, "cdp_url": self.CDP,
+                "features": {"cdp_override": True}}
+
+    def _run(self, monkeypatch, tmp_path, outputs, command="open", args=("https://example.com",)):
+        spawns = TestBackendLevelFailureRecycles._popen_sequence(monkeypatch, tmp_path, outputs)
+        monkeypatch.setattr("tools.browser_tool_cdp._get_cdp_override", lambda: self.CDP)
+        monkeypatch.setattr("tools.browser_tool_cdp._ensure_cdp_supervisor", lambda task_id: None)
+        monkeypatch.setattr("tools.browser_tool_cdp._stop_cdp_supervisor", lambda task_id: None)
+        return spawns, bt_session._run_browser_command(TASK, command, list(args), timeout=5)
+
+    def test_dead_link_reconnects_once_to_the_same_endpoint(self, monkeypatch, tmp_path):
+        stale = self._cdp_session()
+        bt._active_sessions[TASK] = stale
+        ok = json.dumps({"success": True, "data": {"url": "https://example.com/"}}).encode()
+
+        spawns, result = self._run(monkeypatch, tmp_path, [(0, self.DEAD), (0, ok)])
+
+        assert result["success"] is True
+        assert len(spawns) == 2
+        for argv in spawns:
+            assert argv[argv.index("--cdp") + 1] == self.CDP
+        fresh = bt._active_sessions[TASK]
+        assert fresh is not stale and fresh["cdp_url"] == self.CDP
+        assert fresh["session_name"] != stale["session_name"]  # a new daemon generation
+
+    def test_a_link_that_stays_dead_is_retried_only_once(self, monkeypatch, tmp_path):
+        bt._active_sessions[TASK] = self._cdp_session()
+
+        spawns, result = self._run(monkeypatch, tmp_path, [(0, self.DEAD), (0, self.DEAD)])
+
+        assert result == {"success": False, "error": "Auto-launch failed: CDP response channel closed"}
+        assert len(spawns) == 2
+
+    def test_page_level_error_on_a_cdp_session_does_not_reconnect(self, monkeypatch, tmp_path):
+        session_info = self._cdp_session("cdp_healthy")
+        bt._active_sessions[TASK] = session_info
+        page_error = json.dumps({"success": False, "error": "Element @e9 not found"}).encode()
+
+        spawns, result = self._run(monkeypatch, tmp_path, [(0, page_error)], command="click", args=("@e9",))
+
+        assert result == {"success": False, "error": "Element @e9 not found"}
+        assert len(spawns) == 1 and bt._active_sessions[TASK] is session_info
+
+    def test_cloud_sessions_are_left_to_their_own_recovery(self):
+        cloud = {"session_name": "bb", "bb_session_id": "bb-fake", "cdp_url": "wss://cloud.invalid/x"}
+        dead = {"success": False, "error": "CDP response channel closed"}
+        assert not bt_session._is_dead_cdp_link_failure(cloud, dead)
+        assert bt_session._is_dead_cdp_link_failure(self._cdp_session(), dead)
+        assert not bt_session._is_dead_cdp_link_failure(self._cdp_session(), {"success": True})

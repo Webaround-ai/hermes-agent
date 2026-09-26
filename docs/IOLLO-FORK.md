@@ -19,7 +19,10 @@ they must not run upstream's installer/updater as their product update path.
   vendored `iollo_envelope/` producer (see its `VENDORED` file) that the runs API serves as
   envelope revisions; and one approval fix in `tools/approval_context.py`: an `api_server` session
   with a registered approval listener (every `/v1/runs` run) counts as attended, so it asks instead of
-  refusing as an unattended platform.
+  refusing as an unattended platform; and one browser fix in `tools/browser_tool_session.py`
+  (upstream candidate): a CDP-endpoint session whose agent-browser daemon lost its browser link
+  ("CDP response channel closed", e.g. the browser behind `browser.cdp_url` restarted) drops that
+  daemon generation and retries once against the same URL, as a CDP timeout already does.
 - The current base is upstream **v2026.9.24**, package version **0.21.5**, commit
   **f97608f178d1ffeca59860195ab7da295f7c8e5f** (the peeled annotated tag), rebased from
   v2026.9.14 (0.21.3) on 2026-09-25. That rebase tagged on targeted tests only (owner's call);

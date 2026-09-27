@@ -16,6 +16,7 @@ OTHER = {"access_token": "other-access"}
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("IOLLO_VAULT_KEY", raising=False)
+    monkeypatch.delenv("INSTINCT_VAULT_KEY", raising=False)
     return tmp_path
 
 
@@ -58,3 +59,20 @@ def test_without_vault_key_spotify_stays_in_auth_json(home):
     _save(spotify=SPOTIFY)
     assert json.loads((home / "auth.json").read_text())["providers"]["spotify"] == SPOTIFY
     assert not (home / "auth.json.enc").exists()
+
+
+def test_sealed_login_without_the_key_is_refused_not_written_in_plaintext(home, monkeypatch):
+    from tools.token_vault import SealedFileError
+
+    monkeypatch.setenv("IOLLO_VAULT_KEY", VAULT_KEY)
+    _save(spotify=SPOTIFY, nous=OTHER)
+    plain_before = (home / "auth.json").read_text()
+    sealed_before = (home / "auth.json.enc").read_bytes()
+
+    monkeypatch.delenv("IOLLO_VAULT_KEY")
+    with pytest.raises(SealedFileError):
+        auth_mod._load_auth_store()
+    with pytest.raises(SealedFileError):
+        auth_mod._save_auth_store({"providers": {"spotify": {"access_token": "sp-new"}, "nous": OTHER}})
+    assert (home / "auth.json").read_text() == plain_before
+    assert (home / "auth.json.enc").read_bytes() == sealed_before

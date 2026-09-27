@@ -78,3 +78,69 @@ def test_mismatched_iss_is_refused_and_previous_tokens_survive(home):
     with pytest.raises(mcp_oauth.MCPAuthorizationError) as gone:
         mcp_oauth.finish_mcp_authorization("notes", "code-1", STATE, iss=ISSUER)
     assert gone.value.reason == "no_flow"
+
+
+def test_http_redirect_uri_only_for_loopback(home):
+    with pytest.raises(ValueError):
+        mcp_oauth.start_mcp_authorization("notes", "http://control.example/oauth/callback", STATE, config=SERVER)
+    for loopback in ("http://127.0.0.1:8765/cb", "http://localhost:8765/cb", "http://[::1]:8765/cb"):
+        assert mcp_oauth._is_loopback_host(urlparse(loopback).hostname)
+
+
+def test_a_newer_start_waits_for_the_older_attempt_to_roll_back(home, monkeypatch):
+    """The older attempt's rollback (restore of its snapshot) must be over before the newer one
+    touches the server's OAuth state, and the attempt leaves the registry when its worker ends."""
+    import time
+
+    events, starts = [], iter(range(1, 10))
+
+    def probe(name, cfg, connect_timeout=None, **_):
+        n = next(starts)
+        events.append(f"start{n}")
+        try:
+            asyncio.run(mcp_oauth._make_redirect_handler(0)(
+                f"{ISSUER}/authorize?client_id=c1&redirect_uri={REDIRECT}&state={SDK_STATE}{n}"))
+            result = asyncio.run(mcp_oauth._make_callback_waiter(0)())
+            asyncio.run(mcp_oauth.HermesTokenStorage(name).set_tokens(
+                OAuthToken(access_token=f"access-for-{result.code}", token_type="Bearer")))
+            return []
+        finally:
+            time.sleep(0.3)  # a slow wind-down: the older worker is still running after the cancel
+            events.append(f"end{n}")
+
+    monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", probe)
+    mcp_oauth.start_mcp_authorization("notes", REDIRECT, STATE, config=SERVER)
+    mcp_oauth.start_mcp_authorization("notes", REDIRECT, STATE[::-1], config=SERVER)
+    assert events[:3] == ["start1", "end1", "start2"]
+
+    mcp_oauth.finish_mcp_authorization("notes", "code-2", STATE[::-1], iss=ISSUER)
+    assert _stored_access() == "access-for-code-2"
+    deadline = time.monotonic() + 5
+    while mcp_oauth._pending_authorizations and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not mcp_oauth._pending_authorizations
+
+
+def test_a_start_is_busy_while_the_older_attempt_will_not_end(home, monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    def probe(name, cfg, connect_timeout=None, **_):
+        asyncio.run(mcp_oauth._make_redirect_handler(0)(
+            f"{ISSUER}/authorize?client_id=c1&redirect_uri={REDIRECT}&state={SDK_STATE}"))
+        release.wait(10)  # ignores the cancel
+        raise RuntimeError("gave up")
+
+    monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", probe)
+    monkeypatch.setattr(mcp_oauth, "_REPLACE_WAIT_SECONDS", 0.2)
+    mcp_oauth.start_mcp_authorization("notes", REDIRECT, STATE, config=SERVER)
+    try:
+        with pytest.raises(mcp_oauth.MCPAuthorizationError) as busy:
+            mcp_oauth.start_mcp_authorization("notes", REDIRECT, STATE[::-1], config=SERVER)
+        assert busy.value.reason == "busy"
+        with pytest.raises(mcp_oauth.MCPAuthorizationError) as cancelled:
+            mcp_oauth.finish_mcp_authorization("notes", "code-1", STATE, iss=ISSUER)
+        assert cancelled.value.reason == "no_flow"
+    finally:
+        release.set()

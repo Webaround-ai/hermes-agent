@@ -42,7 +42,9 @@ jobs:
     # main commit needs to ship live before the next release tag — e.g.
     # a skills-index PR that doesn't touch website/** paths and so
     # doesn't auto-deploy via the deploy-docs path.
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    # Release-event jobs in this workflow only run for upstream v* release
+    # tags; a fork's own release tags (e.g. iollo-desktop-pro-*) skip them.
+    if: (github.event_name == 'release' || github.event_name == 'workflow_dispatch') && (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -50,7 +52,9 @@ jobs:
         run: curl -fsS --retry 3 --retry-delay 10 -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}"
 
   deploy-docs:
-    if: github.repository == 'NousResearch/hermes-agent'
+    # Release-event jobs in this workflow only run for upstream v* release
+    # tags; a fork's own release tags (e.g. iollo-desktop-pro-*) skip them.
+    if: github.repository == 'NousResearch/hermes-agent' && (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:

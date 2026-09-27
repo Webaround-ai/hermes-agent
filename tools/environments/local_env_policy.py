@@ -4,6 +4,8 @@ names are Hermes-managed credentials. The env *builders* applying it (``_make_ru
 
 import os
 
+from tools.token_vault import VAULT_KEY_ENVS
+
 # Prefix a caller uses in ``extra_env`` to force a blocklisted var through.
 _HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
 
@@ -176,6 +178,8 @@ def _is_hermes_internal_secret(key: str) -> bool:
     auth; non-secret routing hints stay visible). Stripped on every spawn path
     regardless of env_passthrough registration or ``inherit_credentials``."""
     upper = key.upper()
+    if upper in VAULT_KEY_ENVS:  # also on the terminal path, whatever passthrough says
+        return True
     if upper.startswith("AUXILIARY_") and upper.endswith(("_API_KEY", "_BASE_URL")):
         return True
     return upper.startswith("GATEWAY_RELAY_") and upper.endswith(("_SECRET", "_KEY", "_TOKEN"))
@@ -241,4 +245,7 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "HASS_TOKEN", "EMAIL_PASSWORD", "HERMES_DASHBOARD_SESSION_TOKEN",
     # Remote-compute / infrastructure secrets
     "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "DAYTONA_API_KEY",
+    # The key sealing service tokens at rest (tools.token_vault): a child that inherits it can
+    # open every sealed token file.
+    *VAULT_KEY_ENVS,
 })

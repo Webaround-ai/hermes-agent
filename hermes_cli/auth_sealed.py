@@ -1,8 +1,10 @@
 """Sealed providers of the auth store: with ``IOLLO_VAULT_KEY`` set, the state of the providers in
 ``SEALED_AUTH_PROVIDERS`` (the Spotify login) lives in ``auth.json.enc`` (``tools.token_vault``)
 instead of ``auth.json``. ``_load_auth_store`` overlays them, ``_save_auth_store`` splits them out,
-so every reader and writer of the store keeps working unchanged. Without the env var this module
-does nothing and ``auth.json`` is exactly what it was."""
+so every reader and writer of the store keeps working unchanged. Without the key this module does
+nothing and ``auth.json`` is exactly what it was, except when ``auth.json.enc`` exists: then reading
+and writing the store raise ``SealedFileError`` instead of silently dropping the sealed login or
+writing it back to ``auth.json`` in plaintext."""
 
 from __future__ import annotations
 
@@ -28,8 +30,10 @@ def overlay_sealed_providers(
     auth_file: Path, store: Dict[str, Any], *, lock: Callable, load_plain: Callable, save_plain: Callable,
 ) -> Dict[str, Any]:
     """Merge the sealed providers into *store* (sealed state wins). A sealed provider still in the
-    plaintext file is migrated first, under the store lock, and removed from ``auth.json``."""
+    plaintext file is migrated first, under the store lock, and removed from ``auth.json``. Raises
+    ``SealedFileError`` when ``auth.json.enc`` exists and no vault key is set."""
     if not token_vault.vault_active():
+        token_vault.require_vault_for(auth_file)
         return store
     providers = store.get("providers")
     if not isinstance(providers, dict):
@@ -65,9 +69,13 @@ def split_sealed_providers(auth_file: Path, store: Dict[str, Any]) -> Dict[str, 
     """Write *store*'s sealed providers to ``<auth_file>.enc`` and return the copy of *store* that
     goes to ``auth.json`` (without them). *store* itself is not changed. A store with no sealed
     provider removes the sealed file (a logout), unless that file cannot be opened: then it is left
-    alone rather than destroyed by a process that never saw its contents."""
+    alone rather than destroyed by a process that never saw its contents. Raises ``SealedFileError``
+    when ``auth.json.enc`` exists and no vault key is set, so nothing is written."""
+    if not token_vault.vault_active():
+        token_vault.require_vault_for(auth_file)
+        return store
     providers = store.get("providers")
-    if not token_vault.vault_active() or not isinstance(providers, dict):
+    if not isinstance(providers, dict):
         return store
     sealed = {k: v for k, v in providers.items() if k in SEALED_AUTH_PROVIDERS}
     if sealed:

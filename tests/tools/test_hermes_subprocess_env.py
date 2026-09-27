@@ -224,3 +224,21 @@ class TestInternalDynamicSecrets:
         assert {
             "GATEWAY_RELAY_ID", "GATEWAY_RELAY_SECRET", "GATEWAY_RELAY_DELIVERY_KEY",
         } <= _ALWAYS_STRIP_KEYS
+
+
+class TestVaultKeyNeverInherited:
+    """The token vault key (``tools.token_vault``) opens every sealed token file; no child gets it,
+    whether spawned for the terminal or as a credential-inheriting CLI, even via passthrough."""
+
+    _VAULT = {"IOLLO_VAULT_KEY": "vault-fake", "INSTINCT_VAULT_KEY": "vault-fake-old"}
+
+    def test_stripped_on_every_spawn_path(self):
+        from tools.environments.local import _sanitize_subprocess_env
+
+        for inherit in (False, True):
+            result = _build(self._VAULT, inherit_credentials=inherit)
+            assert not set(self._VAULT) & set(result)
+        terminal = _sanitize_subprocess_env({**_SAFE_SAMPLE, **self._VAULT},
+                                            {"_HERMES_FORCE_IOLLO_VAULT_KEY": "forced"})
+        assert not set(self._VAULT) & set(terminal)
+        assert terminal["MY_APP_VAR"] == "keep-me"

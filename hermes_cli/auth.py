@@ -512,8 +512,13 @@ def _load_global_auth_store() -> Dict[str, Any]:
         _global_auth_store_cache = None
         return {}
     try:
-        cache_key: Optional[Tuple[str, Tuple[int, int, int, int]]] = (
-            str(global_path.resolve(strict=False)), file_signature(global_path.stat()))
+        # The sealed overlay (auth.json.enc, see hermes_cli.auth_sealed) is part of the store, so its
+        # signature is part of the memo key too.
+        sealed = global_path.with_name(global_path.name + ".enc")
+        cache_key: Optional[Tuple[str, Any]] = (
+            str(global_path.resolve(strict=False)),
+            (file_signature(global_path.stat()),
+             file_signature(sealed.stat()) if sealed.exists() else None))
     except Exception:
         cache_key = None
     cached = _global_auth_store_cache
@@ -659,7 +664,17 @@ def _empty_auth_store() -> Dict[str, Any]:
 
 
 def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
+    """The auth store at *auth_file* (default: the active profile's), with sealed providers
+    (``hermes_cli.auth_sealed``, only when ``IOLLO_VAULT_KEY`` is set) merged in."""
+    from hermes_cli.auth_sealed import overlay_sealed_providers
     auth_file = auth_file or _auth_file_path()
+    return overlay_sealed_providers(
+        auth_file, _load_plain_auth_store(auth_file), lock=_auth_store_lock,
+        load_plain=_load_plain_auth_store,
+        save_plain=lambda path, store: _save_private_json(path, store, fsync_dir=True))
+
+
+def _load_plain_auth_store(auth_file: Path) -> Dict[str, Any]:
     if not auth_file.exists():
         return _empty_auth_store()
     try:
@@ -718,10 +733,11 @@ def _save_private_json(target: Path, data: Any, *, fsync_dir: bool = False, **du
 def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = None) -> Path:
     """Atomically persist *auth_store* (0o600, parent tightened to 0o700) to the active store, or to
     an explicit *target_path* (e.g. the global-root write-through for rotating xAI OAuth grants)."""
+    from hermes_cli.auth_sealed import split_sealed_providers
     auth_file = target_path if target_path is not None else _auth_file_path()
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(timezone.utc).isoformat()
-    _save_private_json(auth_file, auth_store, fsync_dir=True)
+    _save_private_json(auth_file, split_sealed_providers(auth_file, auth_store), fsync_dir=True)
     if target_path is not None:
         # A write-through to the global root must not be masked by the mtime memo: on coarse-mtime
         # filesystems a read-after-write in the same tick would keep serving the pre-write store.
@@ -1764,7 +1780,7 @@ _NOUS_AUTH_STATUS_CACHE_TTL = 15.0  # seconds
 _nous_auth_status_cache: Optional[Tuple[float, str, Optional[float], Dict[str, Any]]] = None
 
 # mtime-keyed memo for _load_global_auth_store(): (path, mtime_ns, store); same invalidation rule.
-_global_auth_store_cache: Optional[Tuple[str, int, Dict[str, Any]]] = None
+_global_auth_store_cache: Optional[Tuple[str, Any, Dict[str, Any]]] = None
 
 
 def _auth_file_cache_key() -> Tuple[str, Optional[float]]:

@@ -383,7 +383,17 @@ def _can_open_browser() -> bool:
 
 
 def _read_json(path: Path) -> dict | None:
-    """Read a JSON file, returning None if it doesn't exist or is invalid."""
+    """Read a JSON file, returning None if it doesn't exist or is invalid. A ``.enc`` path is a
+    sealed file (``tools.token_vault``): its plaintext sibling is migrated into it first."""
+    from tools import token_vault
+
+    if token_vault.is_sealed(path):
+        try:
+            token_vault.migrate_plaintext(path, name=_sealed_name(path))
+            return token_vault.read_sealed_json(path, name=_sealed_name(path))
+        except (token_vault.SealedFileError, OSError) as exc:
+            logger.warning("Failed to read %s: %s", path, exc)
+            return None
     if not path.exists():
         return None
     try:
@@ -393,13 +403,24 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
+def _sealed_name(path: Path) -> str:
+    """A sealed token file's name relative to the Hermes home (``mcp-tokens/<file>``): the name its
+    key is bound to (``tools.token_vault``)."""
+    return f"{path.parent.name}/{path.name}"
+
+
 def _write_json(path: Path, data: dict) -> None:
     """OAuth tokens/client info at 0600 from creation, parent tightened to 0700 (``secure_parent_dir``
-    refuses ``/``, top-level dirs and the install tree — #25821, #93050)."""
+    refuses ``/``, top-level dirs and the install tree — #25821, #93050). A ``.enc`` path is sealed."""
     from hermes_constants import mkdir_under_hermes_home
+    from tools import token_vault
 
     mkdir_under_hermes_home(path.parent)
     secure_parent_dir(path)
+    if token_vault.is_sealed(path):
+        token_vault.write_sealed_json(path, data, name=_sealed_name(path))
+        return
+    token_vault.require_vault_for(path)
     atomic_json_write(path, data, mode=0o600, default=str)
 
 
@@ -410,7 +431,10 @@ def _model_json(model: Any) -> dict:
 
 class HermesTokenStorage:
     """Persist OAuth state as ``HERMES_HOME/mcp-tokens/<server_name>`` + ``.json`` (tokens),
-    ``.client.json`` (client info), ``.meta.json`` (server metadata), ``.cimd-off`` (CIMD refused)."""
+    ``.client.json`` (client info), ``.meta.json`` (server metadata), ``.cimd-off`` (CIMD refused).
+
+    With ``IOLLO_VAULT_KEY`` set the three state files are sealed (``tools.token_vault``): the same
+    names plus ``.enc``, and a plaintext file left from before is migrated and removed on first use."""
 
     def __init__(self, server_name: str, *, hermes_home: str | Path | None = None):
         self._server_name = _safe_filename(server_name)
@@ -421,13 +445,29 @@ class HermesTokenStorage:
         self.loaded_issuer: str | None = None
         self._bound_issuer: str | None = None
 
-    def _path(self, suffix: str) -> Path:
-        return _get_token_dir(self._hermes_home) / f"{self._server_name}{suffix}"
+    def _path(self, suffix: str, sealable: bool = True) -> Path:
+        """The state file for *suffix*: its sealed ``.enc`` name when the vault key is set. Raises
+        ``SealedFileError`` when a sealed copy exists but the key is missing, so neither a read nor a
+        write silently falls back to a plaintext file next to it."""
+        path = _get_token_dir(self._hermes_home) / f"{self._server_name}{suffix}"
+        from tools import token_vault
+
+        if not sealable:
+            return path
+        if not token_vault.vault_active():
+            token_vault.require_vault_for(path)
+            return path
+        sealed = token_vault.sealed_path(path)
+        try:
+            token_vault.migrate_plaintext(sealed, name=_sealed_name(sealed))
+        except (token_vault.SealedFileError, OSError) as exc:  # the next write seals it
+            logger.warning("Could not seal %s: %s", path.name, exc)
+        return sealed
 
     _tokens_path = partialmethod(_path, ".json")
     _client_info_path = partialmethod(_path, ".client.json")
     _meta_path = partialmethod(_path, ".meta.json")
-    _cimd_rejected_path = partialmethod(_path, ".cimd-off")
+    _cimd_rejected_path = partialmethod(_path, ".cimd-off", False)
 
     def _state_paths(self) -> tuple[Path, Path, Path]:
         return self._tokens_path(), self._client_info_path(), self._meta_path()
@@ -590,9 +630,12 @@ class HermesTokenStorage:
         server's metadata document cannot be re-fetched (#115329)."""
         # The ``.refresh.lock`` sidecar is deliberately kept: flock is inode-bound, so unlinking it
         # while a peer holds the fence would let the next acquirer lock a fresh inode (two holders).
+        from tools import token_vault
+
         for p in (self._tokens_path(), self._client_info_path(), self._cimd_rejected_path(),
                   *(() if keep_metadata else (self._meta_path(),))):
             p.unlink(missing_ok=True)
+            token_vault.plaintext_path(p).unlink(missing_ok=True)  # an unmigrated copy must not outlive a logout
 
     def snapshot(self) -> dict[str, bytes]:
         """filename -> bytes of the existing state files; ``restore()`` it to undo a ``remove()`` after
@@ -1244,6 +1287,209 @@ def build_oauth_auth(server_name: str, server_url: str, oauth_config: dict | Non
             "__doc__": "SDK provider plus Hermes' token-endpoint fixes (see ``HermesProviderMixin``).",
             "__module__": __name__, "_hermes_logger": logger})
     return HermesOAuthClientProvider(server_url=server_url, **kwargs)
+
+
+# ---- Public authorization entry point (proxy redirect URI, caller-owned state) ----------------------
+# For a host that relays the browser redirect itself (a managed box behind a control plane): start
+# returns the authorization URL carrying the caller's ``state``, finish takes the redirect's
+# parameters. The SDK still does discovery, registration, PKCE, its own state check, the RFC 9207
+# ``iss`` check against the discovered metadata and the exchange; the connection is probed once like
+# ``hermes mcp login``. A failed attempt restores the server's previous OAuth state.
+
+
+class MCPAuthorizationError(RuntimeError):
+    """A start/finish that did not authorize. ``reason`` is one of ``no_flow``, ``state_mismatch``,
+    ``denied``, ``timeout``, ``failed``, or ``busy`` (a start whose predecessor for the same server
+    did not wind down in time); the message never carries a code, token or provider text."""
+
+    def __init__(self, reason: str, message: str | None = None):
+        super().__init__(message or reason)
+        self.reason = reason
+
+
+class _PendingAuthorization:
+    """One attempt. It stays registered until its worker has ended (the worker removes it), so a
+    newer start can wait for it instead of racing its rollback. ``closed`` is set once a finish
+    claimed it or it was cancelled: it then takes no further finish."""
+
+    def __init__(self, flow, state: str, done: threading.Event):
+        self.flow, self.state, self.done = flow, state, done
+        self.closed = False
+
+
+_pending_authorizations: "dict[tuple[str, str], _PendingAuthorization]" = {}
+_pending_authorizations_lock = threading.Lock()
+# How long a start waits for a cancelled predecessor's worker to end (its rollback included).
+_REPLACE_WAIT_SECONDS = 15.0
+
+
+def _authorization_key(server_name: str, hermes_home: str | Path | None) -> "tuple[str, str]":
+    from hermes_constants import get_hermes_home
+
+    home = Path(hermes_home) if hermes_home is not None else get_hermes_home()
+    return str(home.expanduser().resolve(strict=False)), server_name
+
+
+def _with_state(url: str, state: str) -> str:
+    from urllib.parse import urlencode, urlunparse
+
+    parsed = urlparse(url)
+    query = [(k, v) for k, vs in parse_qs(parsed.query, keep_blank_values=True).items() for v in vs if k != "state"]
+    return urlunparse(parsed._replace(query=urlencode([*query, ("state", state)])))
+
+
+def _run_authorization(server_name: str, cfg: dict, key: "tuple[str, str]", pending: _PendingAuthorization,
+                       timeout: float) -> None:
+    from hermes_cli.mcp_config import _probe_single_server
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tools.mcp_dashboard_oauth import dashboard_oauth_flow
+    from tools.mcp_oauth_manager import get_manager
+
+    home, flow = key[0], pending.flow
+    home_token = set_hermes_home_override(home)
+    storage = HermesTokenStorage(server_name, hermes_home=home)
+    manager = get_manager()
+    backup, previous = storage.snapshot(), None
+    try:
+        # A new authorization is always fresh: an old registration is bound to another redirect URI.
+        previous = manager.remove(server_name, hermes_home=home)
+        with force_interactive_oauth(), dashboard_oauth_flow(flow):
+            _probe_single_server(server_name, cfg, connect_timeout=timeout)
+        if not storage.has_cached_tokens():
+            raise RuntimeError("the server answered without an OAuth token")
+        flow.mark_approved()
+    except Exception as exc:  # noqa: BLE001 - outcome only; the text may echo provider data
+        storage.restore(backup, only_if_absent=True)
+        manager.restore_entry(server_name, previous, hermes_home=home)
+        flow.mark_error("failed")
+        logger.info("MCP authorization for '%s' did not complete (%s)", server_name, type(exc).__name__)
+    finally:
+        reset_hermes_home_override(home_token)
+        with _pending_authorizations_lock:
+            if _pending_authorizations.get(key) is pending:
+                del _pending_authorizations[key]
+        flow.mark_worker_done()
+        pending.done.set()
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    import ipaddress
+
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def start_mcp_authorization(
+    server_name: str, redirect_uri: str, state: str, *, config: dict | None = None,
+    hermes_home: str | Path | None = None, timeout: float = 315.0,
+) -> str:
+    """Begin an OAuth authorization for MCP server *server_name* and return the authorization URL.
+
+    The provider redirects to *redirect_uri* with *state* (the caller's, at least 16 characters);
+    hand that redirect to :func:`finish_mcp_authorization`. *config* is the server's entry (``url``,
+    optional ``transport``/``oauth``); default: ``mcp_servers.<server_name>`` from config.yaml.
+    *timeout* bounds the whole attempt. A newer start for the same server cancels an older one and
+    waits for it to wind down first (``busy`` if it does not), so the older attempt's rollback never
+    lands on the newer one's tokens. ``http`` redirect URIs are accepted only for a loopback host."""
+    import secrets
+
+    from tools.mcp_dashboard_oauth import DashboardOAuthFlow
+
+    if not isinstance(state, str) or len(state) < 16:
+        raise ValueError("state must be a string of at least 16 characters")
+    parsed_redirect = urlparse(redirect_uri) if isinstance(redirect_uri, str) else None
+    if parsed_redirect is None or parsed_redirect.scheme not in {"https", "http"} or not parsed_redirect.hostname:
+        raise ValueError("redirect_uri must be an http(s) URL")
+    if parsed_redirect.scheme == "http" and not _is_loopback_host(parsed_redirect.hostname):
+        raise ValueError("redirect_uri must use https unless it points at a loopback host")
+    if config is None:
+        from hermes_cli.mcp_config import _get_mcp_servers
+
+        config = _get_mcp_servers().get(server_name)
+    if not isinstance(config, dict) or not config.get("url"):
+        raise ValueError(f"MCP server '{server_name}' has no url to authorize against")
+    cfg = {**config, "auth": "oauth", "oauth": {**(config.get("oauth") or {}), "redirect_uri": redirect_uri}}
+    key = _authorization_key(server_name, hermes_home)
+    with _pending_authorizations_lock:
+        previous = _pending_authorizations.get(key)
+    if previous is not None:
+        _close(previous, "cancelled")
+        if not previous.done.wait(_REPLACE_WAIT_SECONDS):
+            raise MCPAuthorizationError("busy", f"an earlier authorization for '{server_name}' is still ending")
+
+    flow = DashboardOAuthFlow(flow_id=secrets.token_urlsafe(16), server_name=server_name, profile=None,
+                              hermes_home=key[0], redirect_uri=redirect_uri)
+    done = threading.Event()
+    pending = _PendingAuthorization(flow, state, done)
+    with _pending_authorizations_lock:
+        if key in _pending_authorizations:  # a concurrent start got there first
+            raise MCPAuthorizationError("busy", f"another authorization for '{server_name}' just started")
+        _pending_authorizations[key] = pending
+    threading.Thread(target=_run_authorization, args=(server_name, cfg, key, pending, timeout),
+                     daemon=True, name=f"mcp-authorize-{server_name}").start()
+    deadline, url = time.monotonic() + min(timeout, 60.0), None
+    while time.monotonic() < deadline and not done.is_set():
+        if url := flow.snapshot()["authorization_url"]:
+            break
+        time.sleep(0.05)
+    if not url:
+        _close(pending, "failed")  # the worker rolls back and unregisters it
+        raise MCPAuthorizationError("failed", f"MCP server '{server_name}' gave no authorization URL") from None
+    return _with_state(url, state)
+
+
+def finish_mcp_authorization(
+    server_name: str, code: str | None, state: str | None, iss: str | None = None, *,
+    error: str | None = None, hermes_home: str | Path | None = None, timeout: float = 90.0,
+) -> None:
+    """Complete the authorization started by :func:`start_mcp_authorization` with the redirect's
+    ``code``/``state``/``iss`` (or the provider's ``error``). *state* must be the one passed to start.
+    ``iss`` is checked against the discovered metadata's issuer when the server advertises one
+    (RFC 9207). Returns once tokens are stored and the server answered with them; raises
+    :class:`MCPAuthorizationError` otherwise."""
+    import secrets
+
+    key = _authorization_key(server_name, hermes_home)
+    with _pending_authorizations_lock:
+        pending = _pending_authorizations.get(key)
+        if pending is None or pending.closed:
+            raise MCPAuthorizationError("no_flow", f"no authorization in progress for '{server_name}'")
+        if not isinstance(state, str) or not secrets.compare_digest(pending.state.encode(), state.encode()):
+            raise MCPAuthorizationError("state_mismatch", "authorization state does not match")
+        pending.closed = True
+    flow = pending.flow
+    try:
+        flow.deliver_callback(code=code, state=flow.expected_state, error=error, iss=iss)
+    except ValueError:
+        raise MCPAuthorizationError("failed", "authorization already ended") from None
+    if not pending.done.wait(timeout):
+        flow.mark_error("timeout")
+        raise MCPAuthorizationError("timeout", f"authorization for '{server_name}' did not finish in time")
+    if flow.status != "approved":
+        raise MCPAuthorizationError("denied" if error else "failed", f"authorization for '{server_name}' failed")
+
+
+def cancel_mcp_authorization(server_name: str, *, hermes_home: str | Path | None = None) -> bool:
+    """Abandon a started authorization (its worker restores the previous OAuth state). True if one
+    was waiting for its redirect."""
+    with _pending_authorizations_lock:
+        pending = _pending_authorizations.get(_authorization_key(server_name, hermes_home))
+        if pending is None or pending.closed:
+            return False
+    _close(pending, "cancelled")
+    return True
+
+
+def _close(pending: _PendingAuthorization, reason: str) -> None:
+    with _pending_authorizations_lock:
+        pending.closed = True
+    pending.flow.mark_error(reason)
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

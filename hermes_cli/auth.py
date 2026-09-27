@@ -562,7 +562,17 @@ def _empty_auth_store() -> Dict[str, Any]:
 
 
 def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
+    """The auth store at *auth_file* (default: the active profile's), with sealed providers
+    (``hermes_cli.auth_sealed``, only when ``IOLLO_VAULT_KEY`` is set) merged in."""
+    from hermes_cli.auth_sealed import overlay_sealed_providers
     auth_file = auth_file or _auth_file_path()
+    return overlay_sealed_providers(
+        auth_file, _load_plain_auth_store(auth_file), lock=_auth_store_lock,
+        load_plain=_load_plain_auth_store,
+        save_plain=lambda path, store: _save_private_json(path, store, fsync_dir=True))
+
+
+def _load_plain_auth_store(auth_file: Path) -> Dict[str, Any]:
     if not auth_file.exists():
         return _empty_auth_store()
     try:
@@ -621,10 +631,11 @@ def _save_private_json(target: Path, data: Any, *, fsync_dir: bool = False, **du
 def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = None) -> Path:
     """Atomically persist *auth_store* (0o600, parent tightened to 0o700) to the active store, or to
     an explicit *target_path* (a profile store being edited from outside that profile)."""
+    from hermes_cli.auth_sealed import split_sealed_providers
     auth_file = target_path if target_path is not None else _auth_file_path()
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(timezone.utc).isoformat()
-    _save_private_json(auth_file, auth_store, fsync_dir=True)
+    _save_private_json(auth_file, split_sealed_providers(auth_file, auth_store), fsync_dir=True)
     return auth_file
 
 

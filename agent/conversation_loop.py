@@ -706,7 +706,9 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     if stored_prompt and _stored_prompt_matches_runtime(agent, stored_prompt):
         if prompt_version_stale(agent, session_row):
             # The caller declared new prompt-visible text (iollo fork brief 043): rebuild once,
-            # keep the transcript, session id and tools[] pin; on_session_start not re-fired.
+            # keep the transcript and session id, and re-pin tools[] to what this turn builds (the
+            # prefix cache breaks once anyway, and new tools must reach old sessions);
+            # on_session_start not re-fired.
             logger.info(
                 "Declared prompt_version changed for session %s (%s -> %s); rebuilding system "
                 "prompt (one-time prefix-cache break).",
@@ -714,14 +716,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             )
             from agent.system_prompt import invalidate_system_prompt
             invalidate_system_prompt(agent)
-            built_for_this_surface = _restore_pinned_tools(agent, session_row)
             agent._cached_system_prompt = agent._build_system_prompt(system_message)
             stage_surface_switch_note(agent, agent._cached_system_prompt, conversation_history)
-            note_inert_pinned_tools(agent, built_for_this_surface)
             _persist_system_prompt(
                 agent,
                 "Session DB update_system_prompt failed after prompt_version change "
                 "(session=%s): %s. The rebuild will re-fire next turn.",
+                persist_tools=True,
             )
             return
         if _bot_chat_prompt_stale(agent, stored_prompt):

@@ -110,3 +110,16 @@ def test_normalize_accepts_optional_string(value, expected):
 def test_normalize_rejects_non_string_or_oversized(value):
     with pytest.raises(ValueError):
         normalize_prompt_version(value)
+
+
+def test_changed_version_repins_tools_to_this_turn(db, monkeypatch):
+    """New tools (e.g. a plugin added one) must reach an old session when its prompt is refreshed."""
+    _seed(db, version="v1")
+    import tools.mcp_tool_agent as mcp_tool_agent
+    persisted = []
+    monkeypatch.setattr(mcp_tool_agent, "persist_agent_tool_names", lambda agent: persisted.append(agent))
+    restored = []
+    monkeypatch.setattr(mcp_tool_agent, "restore_agent_tool_prefix", lambda agent, pin: restored.append(pin))
+    agent = _turn(db, "v2")
+    assert persisted == [agent]
+    assert restored == []

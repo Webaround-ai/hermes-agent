@@ -27,6 +27,7 @@ they must not run upstream's installer/updater as their product update path.
   (per-child model + reasoning effort for `delegate_task`, `tools/delegate_tool_tiers.py`), the
   advice-only `escalate` tool behind `delegation.escalate` (`tools/escalate_tool.py`), and three chooser
   hooks (`delegation_tier_chooser`, `escalate_gate`, `busy_input_chooser`; `hermes_cli/plugin_choices.py`).
+  Fork brief 043 adds an optional `prompt_version` on `POST /v1/runs` (see "Prompt version" below).
 - The current base is upstream **v2026.9.24**, package version **0.21.5**, commit
   **f97608f178d1ffeca59860195ab7da295f7c8e5f** (the peeled annotated tag), rebased from
   v2026.9.14 (0.21.3) on 2026-09-25. That rebase tagged on targeted tests only (owner's call);
@@ -39,6 +40,23 @@ git remote -v
 git rev-parse 'v2026.9.14^{commit}'
 git show v2026.9.14:pyproject.toml
 ```
+
+## Prompt version (fork brief 043)
+
+A session keeps the system prompt it stored on its first turn, so prompt-text changes (SOUL,
+plugin prompt sections) never reached an existing session unless the control plane rotated it.
+`POST /v1/runs` now accepts an optional string `prompt_version` (trimmed, at most 200 characters;
+blank counts as absent; any other type is a 400 `invalid_prompt_version`). It is stored as
+`prompt_version` in the session's `model_config` (no schema change). When a turn declares a version
+that differs from the stored one, or the session has none stored, the stored prompt is rebuilt once
+(`invalidate_system_prompt`, then the normal build and `_persist_system_prompt`) and the new version
+is stored. Same version, or no `prompt_version` sent: the stored bytes are reused as before. The
+transcript, session id and `tools[]` pin never change, and `on_session_start` is not re-fired.
+Compression children inherit the version through `_session_init_model_config`. Code:
+`agent/prompt_version.py`, `_restore_or_build_system_prompt` in `agent/conversation_loop.py`;
+tests: `tests/agent/test_prompt_version.py` and the `prompt_version` cases in
+`tests/gateway/test_api_server_runs.py`. A turn a live Desktop Bot Chat owner executes (mailbox
+path) is not affected.
 
 ## Taking an upstream release
 

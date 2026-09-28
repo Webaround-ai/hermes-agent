@@ -289,6 +289,38 @@ class TestStartRun:
         assert captured.get("turn_author", "absent") == expected
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("body, expected", [
+        ({"input": "hello", "prompt_version": " soul-v7 "}, "soul-v7"),
+        ({"input": "hello", "prompt_version": ""}, None),
+        ({"input": "hello"}, None),
+    ], ids=["declared", "blank", "absent"])
+    async def test_start_declares_prompt_version_on_the_run_agent(self, adapter, body, expected):
+        """Fork brief 043: ``prompt_version`` reaches the agent's prompt-restore; absent keeps today's agent."""
+        app = _create_runs_app(adapter)
+        captured = {}
+        agent = self._capturing_agent(captured)
+        agent._session_init_model_config = {}
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=agent):
+                resp = await cli.post("/v1/runs", json=body)
+                assert resp.status == 202
+                await self._wait_completed(cli, (await resp.json())["run_id"])
+        assert agent._prompt_version == expected
+        assert agent._session_init_model_config.get("prompt_version") == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", [7, ["v1"], "x" * 201])
+    async def test_start_rejects_invalid_prompt_version(self, adapter, value):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                resp = await cli.post("/v1/runs", json={"input": "hello", "prompt_version": value})
+                assert resp.status == 400
+                body = await resp.json()
+        assert body["error"]["code"] == "invalid_prompt_version"
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("author", ["dixie", ["dixie"], 7])
     async def test_start_rejects_non_object_author(self, adapter, author):
         app = _create_runs_app(adapter)

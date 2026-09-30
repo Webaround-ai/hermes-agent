@@ -46,6 +46,33 @@ def test_escalate_without_a_detector_is_labelled_other(plugin, box):
     assert result["action"] == "approve" and result["message"].startswith("tier3:other: ")
 
 
+SHOP_SNAPSHOT = json.dumps({"success": True, "data": {"snapshot": "\n".join([
+    '- link "Fake USB-C cable, 1 m" [ref=e80]',
+    '- text "3,99 €" [ref=e81]',
+    '- button "Añadir a la cesta" [ref=e484]',
+    '- button "Add to basket" [ref=e485]',
+    '- searchbox "Search" [ref=e274]',
+])}})
+
+
+@pytest.mark.parametrize("ref", ["@e80", "@e484", "@e485", "@e274"])
+def test_an_escalated_browser_click_without_a_detector_is_tier1(plugin, box, ref):
+    """Task #45 (2026-09-30): the judge escalated product, add-to-basket and search clicks on a price list; each
+    waited a minute for an approval and was refused. Only a pay control or a card field asks the owner."""
+    use_judge(plugin, StubJudge("ESCALATE"))
+    plugin._on_post_tool_call(tool_name="browser_snapshot", args={}, result=SHOP_SNAPSHOT, status="ok", session_id="s1")
+    assert _call(plugin, "browser_click", {"ref": ref}) is None
+
+
+def test_an_escalated_pay_control_or_card_field_still_asks(plugin, box):
+    use_judge(plugin, StubJudge("ESCALATE"))
+    _see_checkout(plugin)
+    assert _call(plugin, "browser_click", {"ref": "@e5"})["message"].startswith("tier3:pay: ")
+    assert _call(plugin, "browser_type", {"ref": "@e3", "text": FAKE_CARD})["message"].startswith("tier3:pay: ")
+    use_judge(plugin, StubJudge("DENY"))
+    assert _call(plugin, "browser_click", {"ref": "@e1"})["action"] == "block"
+
+
 def test_deny_is_a_hard_block(plugin, box):
     use_judge(plugin, StubJudge("DENY"))
     result = _call(plugin, "write_file", {"path": str(box.ws / "a.txt"), "content": "x"})

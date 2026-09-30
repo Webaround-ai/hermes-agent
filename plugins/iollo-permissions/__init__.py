@@ -174,6 +174,14 @@ def _on_pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "
         logger.info("iollo-permissions: judge_fallback tool=%s reason=%s", tool_name, why)
         verdict = "tier3" if detector else "tier1"
 
+    if verdict == "tier3" and detector is None and tool_name.startswith("browser_") \
+            and tool_name in settings.policy.pay_tools:
+        # A browser click or typing asks the owner only when a detector names it (a card field, a pay control on a
+        # page showing money, a password field): the judge sees the task and the page, and escalated an add-to-basket
+        # click on a price list. The judge can still block, or clear a detector's call.
+        logger.info("iollo-permissions: judge_escalation_without_detector tool=%s -> tier1", tool_name)
+        verdict = "tier1"
+
     if verdict == "block":
         return _block(tier4_message(_plain_action(tool_name, args)))
 

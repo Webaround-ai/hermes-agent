@@ -1,3 +1,6 @@
+> **Iollo fork contributors:** start with [docs/iollo/README.md](docs/iollo/README.md) and root
+> [AGENTS.md](AGENTS.md). The upstream feature catalog below is not the Iollo deployment architecture.
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>

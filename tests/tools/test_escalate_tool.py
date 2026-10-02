@@ -241,7 +241,7 @@ def test_caps_still_enforced_when_set_alongside_levels(monkeypatch):
 
 
 def test_reasoning_update_replays_without_rewriting_parent_or_starting_advisor(monkeypatch):
-    from agent.codex_responses_adapter import _chat_messages_to_responses_input
+    from agent.codex_responses_adapter import _chat_messages_to_responses_input, _preflight_codex_api_kwargs
     from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
     cfg = {**CFG, "escalate": {**CFG["escalate"], "reasoning_updates": True, "require_gate": True}}
     _use_cfg(monkeypatch, cfg)
@@ -258,6 +258,11 @@ def test_reasoning_update_replays_without_rewriting_parent_or_starting_advisor(m
     after = _chat_messages_to_responses_input(messages, current_issuer_model="gpt-6-luna")
     assert after[:len(before)] == before
     assert after[-1] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
+    # The production transport preflights after conversion; this must reach the wire intact.
+    wire = _preflight_codex_api_kwargs({"model": parent.model, "instructions": "Stable system",
+                                       "input": after, "reasoning": parent.reasoning_config})
+    assert wire["input"] == after
+    assert wire["reasoning"]["effort"] == "low"
     assert parent.reasoning_config["effort"] == "low" and not calls
     assert et.current_reasoning_effort(parent, messages) == "high"
     assert not any(x.get("type") == "configuration_update" for x in

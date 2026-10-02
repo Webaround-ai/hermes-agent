@@ -863,9 +863,17 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) 
     return {"role": role, "content": validated}
 
 
+def _preflight_configuration_update(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
+    """Keep the append-only reasoning upgrade emitted by the escalation adapter."""
+    if item.get("reasoning") != {"effort": "high"}:
+        raise ValueError(f"Codex Responses input[{idx}] has an invalid reasoning configuration update.")
+    return {"type": "configuration_update", "reasoning": {"effort": "high"}}
+
+
 _PREFLIGHT_ITEM_HANDLERS: Dict[str, Callable[..., Optional[Dict[str, Any]]]] = {
     "function_call": _preflight_function_call, "function_call_output": _preflight_function_call_output,
     "reasoning": _preflight_encrypted, "compaction": _preflight_encrypted, "message": _preflight_message,
+    "configuration_update": _preflight_configuration_update,
 }
 
 

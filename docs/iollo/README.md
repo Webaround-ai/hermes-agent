@@ -3,11 +3,12 @@
 Source audit 2026-10-02: Hermes `430513efacf1` (`origin/iollo`, local rc9 tag); cloud
 `4f8777d94dbe`. This file is the fork entrypoint, not a parallel product architecture.
 
-Read cloud [ARCHITECTURE](https://github.com/Webaround-ai/iollo/blob/main/docs/ARCHITECTURE.md),
-[WEBAROUND-ROUTER](https://github.com/Webaround-ai/iollo/blob/main/docs/WEBAROUND-ROUTER.md),
-[CONVERSATIONS](https://github.com/Webaround-ai/iollo/blob/main/docs/CONVERSATIONS.md) and
-[DATA-RETENTION](https://github.com/Webaround-ai/iollo/blob/main/docs/DATA-RETENTION.md).
-The umbrella Iollo README identifies the local audited docs checkout while these edits are unmerged.
+Read cloud [ARCHITECTURE](https://github.com/Webaround-ai/iollo/blob/2da0b38/docs/ARCHITECTURE.md),
+[WEBAROUND-ROUTER](https://github.com/Webaround-ai/iollo/blob/2da0b38/docs/WEBAROUND-ROUTER.md),
+[CONVERSATIONS](https://github.com/Webaround-ai/iollo/blob/2da0b38/docs/CONVERSATIONS.md) and
+[DATA-RETENTION](https://github.com/Webaround-ai/iollo/blob/2da0b38/docs/DATA-RETENTION.md).
+The cloud links pin the audited documentation commit, available to the team before integration.
+After integration, the canonical document paths remain under cloud `docs/`.
 
 Iollo runs the personal agent on one Linux machine/volume per owner. Web is a device client; Mac is
 menu bar/local tools. iOS and Desktop Pro are parked. Upstream room, desktop, messaging or local-agent

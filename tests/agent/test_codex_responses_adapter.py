@@ -21,6 +21,12 @@ _HARMONY_SOURCE_SNIPPET = (
 )
 
 
+@pytest.mark.parametrize("reasoning", [None, {}, {"effort": "invalid"}, {"effort": "high", "extra": True}])
+def test_preflight_rejects_invalid_configuration_updates(reasoning):
+    with pytest.raises(ValueError, match="invalid reasoning configuration update"):
+        _preflight_codex_input_items([{"type": "configuration_update", "reasoning": reasoning}])
+
+
 def _strict_tool(name, strict_marker=None):
     fn = {"name": name, "parameters": {"type": "object", "properties": {}}}
     if strict_marker is not None:

@@ -78,6 +78,8 @@ _STATIC_FEATURE_FLAGS = {
 _CAPABILITY_ENDPOINTS = (
     ("health", ("GET", "/health")), ("health_detailed", ("GET", "/health/detailed")),
     ("models", ("GET", "/v1/models")), ("model_options", ("GET", "/api/model/options")),
+    ("voice_transcribe", ("POST", "/v1/voice/transcribe")),
+    ("voice_speak", ("POST", "/v1/voice/speak")),
     ("chat_completions", ("POST", "/v1/chat/completions")),
     ("responses", ("POST", "/v1/responses")), ("runs", ("POST", "/v1/runs")),
     ("run_status", ("GET", "/v1/runs/{run_id}")),
@@ -1306,6 +1308,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         with suppress(Exception):
             from tools.async_delegation import active_count
             active_delegations = active_count()
+        active_api_runs += len(getattr(self, "_audio_tasks", ()))
         return active_api_runs, process_depth, active_delegations
 
     @staticmethod
@@ -1629,6 +1632,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("POST", "/api/jobs/{job_id}/run", self._handle_run_job)]
         routes.extend(_room_grants._http_routes(self))
         routes.extend(_api_runs._http_routes(self))
+        from gateway.platforms.api_server_audio import http_routes
+        routes.extend(http_routes(self))
         if _CRON_AVAILABLE:
             # Chronos fire webhook (NAS -> agent): authenticated by a NAS-minted JWT.
             routes.append(("POST", "/api/cron/fire", self._handle_cron_fire))
@@ -2351,6 +2356,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @_require_auth
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — the stable, machine-readable API surface for external UIs."""
+        from gateway.platforms.api_server_audio import enabled as audio_enabled
         return web.json_response({
             "object": "hermes.api_server.capabilities", "platform": "hermes-agent",
             "model": self._model_name,
@@ -2366,6 +2372,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "responses_api": True, "responses_streaming": True, "run_submission": True,
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
                 **_STATIC_FEATURE_FLAGS,
+                "audio_api": bool(self._api_key) and audio_enabled(),
                 "cors": bool(self._cors_origins),
                 # Always advertised for feature-detection; enabled follows config.
                 "browser_extension_control": {

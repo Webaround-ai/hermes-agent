@@ -89,6 +89,8 @@ def escalate_config(cfg: Optional[dict] = None) -> Optional[Dict[str, Any]]:
         "max_per_day": _cap(raw.get("max_per_day")),
         "gate_timeout_ms": _int(raw.get("gate_timeout_ms"), DEFAULT_GATE_TIMEOUT_MS),
         "max_iterations": _int(raw.get("max_iterations"), DEFAULT_MAX_ITERATIONS, floor=1),
+        "reasoning_updates": raw.get("reasoning_updates") is True,
+        "require_gate": raw.get("require_gate") is True,
     }
 
 
@@ -195,17 +197,18 @@ def _gate_answer(answer: Any) -> Optional[Tuple[str, str]]:
         action, reason = str(answer.get("action") or "").strip().lower(), str(answer.get("reason") or "").strip()
     else:
         return None
-    return (action, reason) if action in ("escalate", "continue") else None
+    return (action, reason) if action in ("escalate", "continue", "think_harder") else None
 
 
 def _ask_gate(esc: Dict[str, Any], tier: str, level: int, model: str, parent_agent, *, question: str, context: str,
-              constraints: str, wanted: str) -> Optional[Tuple[str, str]]:
+              constraints: str, wanted: str, current_effort=None) -> Optional[Tuple[str, str]]:
     from hermes_cli.plugin_choices import first_plugin_choice
     used_task, used_day = usage(parent_agent)  # already includes this call's reservation
     return first_plugin_choice(
         "escalate_gate", timeout_s=esc["gate_timeout_ms"] / 1000.0, accept=_gate_answer,
         question=question, context=context, constraints=constraints, wanted=wanted,
-        tier=tier, level=level, model=model, used_this_task=used_task, used_today=used_day,
+        tier=tier, level=level, model=model, parent_model=getattr(parent_agent, "model", None),
+        current_effort=current_effort, reasoning_updates=esc["reasoning_updates"], used_this_task=used_task, used_today=used_day,
         max_per_task=esc["max_per_task"], max_per_day=esc["max_per_day"],
         session_id=getattr(parent_agent, "session_id", None),
         turn_id=getattr(parent_agent, "_current_turn_id", None),
@@ -235,8 +238,16 @@ def _compose(question: str, context: str, constraints: str, wanted: str) -> Tupl
     return goal, "\n\n".join(parts)
 
 
+def current_reasoning_effort(parent_agent, messages=None):
+    from agent.reasoning_updates import reasoning_updates
+    effort = (getattr(parent_agent, "reasoning_config", None) or {}).get("effort", "low")
+    for update in reasoning_updates(messages or [], getattr(parent_agent, "model", "")).values():
+        effort = update["reasoning"]["effort"]
+    return effort
+
+
 def escalate(question: str = "", context: str = "", constraints: str = "", wanted: str = "",
-             parent_agent=None) -> str:
+             parent_agent=None, messages=None) -> str:
     """Run one advice-only child on the configured escalation tier and return its answer as JSON."""
     if parent_agent is None:
         return tool_error("escalate requires a parent agent context.")
@@ -271,9 +282,20 @@ def escalate(question: str = "", context: str = "", constraints: str = "", wante
         return tool_error(str(exc))
     try:
         verdict = _ask_gate(esc, tier, level, route["model"], parent_agent, question=question, context=context,
-                            constraints=constraints, wanted=wanted)
+                            constraints=constraints, wanted=wanted,
+                            current_effort=current_reasoning_effort(parent_agent, messages))
     except Exception:
         verdict = None
+    if verdict is None and esc["require_gate"]:
+        verdict = ("continue", "Routing check unavailable. Continue without launching a paid advisor.")
+    if verdict is not None and verdict[0] == "think_harder":
+        _refund(parent_agent)
+        supported = (esc["reasoning_updates"] and getattr(parent_agent, "api_mode", None) == "codex_responses"
+                     and str(getattr(parent_agent, "model", "")).split("/")[-1] == "gpt-6-luna")
+        if not supported or current_reasoning_effort(parent_agent, messages) == "high":
+            return json.dumps({"escalated": False, "reason": "Reasoning update unavailable or already high."})
+        return json.dumps({"escalated": False, "reasoning_update": {"model": parent_agent.model, "effort": "high"},
+                           "reason": "Continue this task with higher reasoning. No advisor was launched."})
     if verdict is not None and verdict[0] == "continue":
         _refund(parent_agent)
         reason = verdict[1] or "The escalation gate judged this solvable without escalating."
@@ -339,8 +361,10 @@ def _run_advisor(parent_agent, goal: str, brief: str, route: Dict[str, Any], bas
 ESCALATE_SCHEMA = {
     "name": "escalate",
     "description": (
-        "Ask a stronger model for ADVICE on a hard decision or a problem you could not solve after real "
-        "attempts. It is expensive and capped per task and per day, so use it rarely. The advisor starts "
+        "Request a routing check on a hard decision or a problem you could not solve after real "
+        "attempts. The gate may let you continue, increase your reasoning, or ask a stronger advisor. "
+        "Give the concrete difficulty and failed attempts; do not request upgrades for missing access or service errors. "
+        "Paid advice is capped, so use it rarely. The advisor starts "
         "COLD — it sees nothing of this conversation — so write a complete brief: the question, what you "
         "tried with exact errors, your constraints, and the decision you need. It cannot act: it returns "
         "advice, and you apply it. It may be declined, with a reason; then continue on your own."

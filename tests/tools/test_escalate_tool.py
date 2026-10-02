@@ -238,3 +238,37 @@ def test_caps_still_enforced_when_set_alongside_levels(monkeypatch):
     assert json.loads(et.escalate(**ARGS, parent_agent=turn))["escalated"] is True
     refused = json.loads(et.escalate(**ARGS, parent_agent=turn))
     assert refused["escalated"] is False and "this task" in refused["reason"]
+
+
+def test_reasoning_update_replays_without_rewriting_parent_or_starting_advisor(monkeypatch):
+    from agent.codex_responses_adapter import _chat_messages_to_responses_input
+    from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
+    cfg = {**CFG, "escalate": {**CFG["escalate"], "reasoning_updates": True, "require_gate": True}}
+    _use_cfg(monkeypatch, cfg)
+    calls = _fake_advisor(monkeypatch)
+    parent = _parent()
+    parent.model, parent.api_mode = "openai/gpt-6-luna", "codex_responses"
+    _install_gate(monkeypatch, lambda **kw: "think_harder")
+    messages = [{"role": "user", "content": "Solve this problem"},
+                {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "escalate", "arguments": json.dumps(ARGS)}}]}]
+    before = _chat_messages_to_responses_input(messages, current_issuer_model="gpt-6-luna")
+    result = INLINE_TOOL_EXECUTORS["escalate"](parent, ARGS, InlineToolContext("task", messages=messages))
+    messages.append({"role": "tool", "tool_call_id": "call_1", "content": result})
+    after = _chat_messages_to_responses_input(messages, current_issuer_model="gpt-6-luna")
+    assert after[:len(before)] == before
+    assert after[-1] == {"type": "configuration_update", "reasoning": {"effort": "high"}}
+    assert parent.reasoning_config["effort"] == "low" and not calls
+    assert et.current_reasoning_effort(parent, messages) == "high"
+    assert not any(x.get("type") == "configuration_update" for x in
+                   _chat_messages_to_responses_input(messages, current_issuer_model="gpt-6.1-sol"))
+    again = json.loads(et.escalate(**ARGS, parent_agent=parent, messages=messages))
+    assert "reasoning_update" not in again and not calls
+
+
+def test_required_routing_gate_fails_closed_without_launching_advisor(monkeypatch):
+    _use_cfg(monkeypatch, {**CFG, "escalate": {**CFG["escalate"], "require_gate": True}})
+    _install_gate(monkeypatch, lambda **kw: None)
+    calls = _fake_advisor(monkeypatch)
+    assert json.loads(et.escalate(**ARGS, parent_agent=_parent()))["escalated"] is False
+    assert not calls

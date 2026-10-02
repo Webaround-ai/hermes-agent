@@ -891,7 +891,11 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if delta is None or run_id not in self._run_streams:
             return
         with suppress(Exception):
-            loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "message.delta", delta=delta))
+            # Capture the attempt identity on the producing thread, before a retry can
+            # advance the writer. Consumers replace drafts when this identity changes.
+            identity = getattr(self._active_run_agents.get(run_id), "_stream_writer_token", None)
+            loop.call_soon_threadsafe(run.put_event, _run_event(
+                run_id, "message.delta", delta=delta, stream_id=identity if type(identity) is int else None))
 
     def _interim_cb(text: str, *, already_streamed: bool = False) -> None:
         # Mid-turn assistant commentary (Codex ``phase="commentary"``, text beside tool calls),

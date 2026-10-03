@@ -1,11 +1,22 @@
 # Iollo Hermes distribution
 
-The product consumes releases from **Webaround-ai/hermes-agent** and images from
-**ghcr.io/webaround-ai/hermes-agent**. A single `iollo-*` tag produces the Linux box
-image and both Mac Python runtimes. This machinery does not change Hermes behavior,
-deploy boxes, update an installed Mac app, or change the upstream `hermes update`
-command. The box deployer and Mac app must select these Iollo artifacts themselves;
-they must not run upstream's installer/updater as their product update path.
+Read [the Iollo integration guide](iollo/README.md) first. Active development is web and the
+Mac menu bar/local tools, supported by the personal cloud boxes. iOS and Desktop Pro are parked.
+The Mac companion does not run the conversational agent.
+
+Cloud uses the pinned fork base image in `registry.fly.io/instinct-sandboxes`, then builds
+its own sandbox layer. At the 2026-10-03 source review the pin is **iollo-2026.9.24-rc10**,
+Hermes commit **a4976548790078dee821983d2bef6cc3c728fb62**. Cloud
+`sandbox/hermes-base.txt`, the Dockerfile fallback and an explicit build override determine
+that base; the final sandbox image and successful rollout determine what owners receive.
+
+The packaging sections below describe the existing full release workflow and its historical
+Mac Python runtime artifacts. A matching fork tag does not prove that workflow ran or that a
+GitHub release exists: rc7–rc10 were cloud runtime updates without published full runtime
+releases as of this review. Do not refresh parked clients or their runtime pins as part of
+routine cloud/menu bar work. Neither publishing a base nor creating a tag deploys boxes.
+Iollo managed boxes use cloud policy and deployment controls rather than the upstream
+`hermes update` command.
 
 ## Branches and the verified starting point
 
@@ -37,8 +48,8 @@ they must not run upstream's installer/updater as their product update path.
 
 ```sh
 git remote -v
-git rev-parse 'v2026.9.14^{commit}'
-git show v2026.9.14:pyproject.toml
+git rev-parse 'v2026.9.24^{commit}'
+git show v2026.9.24:pyproject.toml
 ```
 
 ## Prompt version (fork brief 043)
@@ -51,7 +62,9 @@ blank counts as absent; any other type is a 400 `invalid_prompt_version`). It is
 that differs from the stored one, or the session has none stored, the stored prompt is rebuilt once
 (`invalidate_system_prompt`, then the normal build and `_persist_system_prompt`) and the new version
 is stored. Same version, or no `prompt_version` sent: the stored bytes are reused as before. The
-transcript, session id and `tools[]` pin never change, and `on_session_start` is not re-fired.
+transcript and session id never change, and `on_session_start` is not re-fired. On that
+one refresh turn the runtime re-pins `tools[]` to the current build, so new configured tools
+reach an existing session. Subsequent turns reuse the stored prompt and tool prefix.
 Compression children inherit the version through `_session_init_model_config`. Code:
 `agent/prompt_version.py`, `_restore_or_build_system_prompt` in `agent/conversation_loop.py`;
 tests: `tests/agent/test_prompt_version.py` and the `prompt_version` cases in
@@ -60,7 +73,10 @@ path) is not affected.
 
 ## Taking an upstream release
 
-Start from a clean checkout and record the old base before rebasing. Never move or
+Use an isolated clean worktree and record the old base before a deliberate upstream upgrade.
+Do not switch or reset a shared primary checkout. This procedure describes upgrade work; a
+stability pass does not authorize changing the upstream base or building parked client releases.
+Never move or
 reuse a published Iollo tag. Branch protection should permit a coordinated rebase
 of `iollo`, while protecting release tags from modification/deletion.
 
@@ -277,7 +293,7 @@ then stage a GitHub draft containing all assets before publishing the release.
 If final publication fails, inspect/delete the incomplete draft before rerunning
 that job; never overwrite a release consumers have already downloaded.
 
-## Owner setup and product integration
+## Historical runtime-bundle integration
 
 Enable Actions and select the Intel runner as above, allow the jobs' scoped token permissions,
 and ensure this repository can write its GHCR package. If the package already exists,
@@ -285,15 +301,18 @@ grant it Actions access to this repository. Choose public package visibility if 
 pulls anonymously; otherwise provision Fly's registry pull credentials. GitHub's
 repository/package visibility settings are separate.
 
-Open integration decisions, answered 2026-09-24: the Mac app pins one fork tag and
+Historical integration decisions, answered 2026-09-24 (superseded for the active menu bar
+companion by the cloud-agent architecture above): the Mac app pins one fork tag and
 embeds that tag's arm64 tarball, checked against the SHA-256 in its own repository
 (iollo-mac brief 028); the cloud promote command rolls boxes onto
 `hermes-base-<tag>` for the same tag (iollo brief 030). Still open: an Intel runner
 and GHCR visibility. These consumer changes live in those repositories.
 
-## Box image on the Fly registry (added 2026-09-24)
+## Box image on the Fly registry
 
 The `box` job also pushes the same image to `registry.fly.io/instinct-sandboxes:hermes-base-<tag>`,
 using the repository secret `FLY_API_TOKEN` (a Fly deploy token scoped to the `instinct-sandboxes`
-app). The iollo cloud repository's `sandbox/Dockerfile` starts `FROM` that tag, so a fork release is the
-box base image with no manual mirroring step. GHCR keeps a copy for reference; it is private.
+app). Cloud's sandbox image adds its integration layer on the selected base; existing cloud-only
+base builds may publish directly to this registry without a full GitHub release. Pin the exact
+fork revision and registry digest in the build evidence. GHCR publication is an additional
+artifact of the full release workflow, not a required marker of cloud fleet convergence.

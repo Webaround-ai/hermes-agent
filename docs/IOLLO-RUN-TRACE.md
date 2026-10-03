@@ -46,3 +46,12 @@ owner-box agent conversation persistence is unchanged.
   envelope producer maps event previews into trace detail.
 - Approval trace continues to come from the envelope prompt. No new approval event,
   transport frame or deployment is introduced here.
+
+## Native text attempt identity (rc10)
+
+`gateway/platforms/api_server_runs.py` adds the producing agent's integer `stream_id` to
+`message.delta` SSE events before scheduling delivery onto the event loop. Consumers use that identity
+to replace a retried draft instead of concatenating an abandoned attempt with its replacement.
+The identity is `null` when an older producer supplies none; this addition does not alter the prompt, model
+selection or tool trace contract. `tests/gateway/test_api_server_runs.py` exercises real HTTP/SSE
+delivery from two generation attempts.

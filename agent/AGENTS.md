@@ -55,7 +55,10 @@ Adding one: register in that table (no `if name == ...` chain); `tools/todo_tool
 
 - **Prompt caching must not break.** Never alter past context, change toolsets, reload memories,
   or rebuild the system prompt mid-conversation. The system prompt is byte-stable for the life of
-  a conversation; the ONLY context mutation is compression. Anything that must inject content
+  a conversation; upstream context mutation is compression. Iollo
+  `prompt_version` is an explicit additional boundary: a changed caller version refreshes the
+  stored prompt and tool pin once, preserving transcript/session; see [IOLLO-FORK](../docs/IOLLO-FORK.md).
+  Anything that must inject content
   mid-conversation rides a **user message or tool result**, never the system prompt: skill slash
   commands (`agent/skill_commands.py`) inject as a user message; subdirectory `AGENTS.md` hints
   (`agent/subdirectory_hints.py`) append to the tool result (head+tail truncated past `_MAX_HINT_CHARS = 32_000`;
@@ -87,7 +90,8 @@ id; native Responses/Codex compaction paths are provider-specific. A stalled sum
 once on `auxiliary.compression.fallback_chain`, and a repeated stall (a stall-class failure already on
 the cooldown ladder) ends with the deterministic fallback summary through the same pipeline — never a
 prune committed outside the lease/fence. Compression is the sanctioned
-cache break — keep it the only one. Full detail:
+cache break; the Iollo caller-declared prompt-version boundary above is the other explicit
+exception. Full detail:
 `website/docs/developer-guide/context-compression-and-caching.md`.
 
 ## Model and provider resolution

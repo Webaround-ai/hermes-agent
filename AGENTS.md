@@ -41,7 +41,9 @@ Two invariants shape almost every design decision and are the lens for reviewing
 - **Per-conversation prompt caching is sacred.** A long-lived conversation reuses a cached
   prefix every turn. Anything that mutates past context, swaps toolsets, reloads memories, or
   rebuilds the system prompt mid-conversation invalidates that cache and multiplies the user's
-  cost. We do not do it; the ONE exception is context compression. Slash commands that mutate
+  cost. Upstream keeps context compression as the exception. Iollo also implements the explicit
+  caller-declared `prompt_version` refresh described in [IOLLO-FORK](docs/IOLLO-FORK.md): one
+  prompt/tool re-pin when the version changes, with transcript/session preserved. Slash commands that mutate
   system-prompt state (skills, tools, memory) must be **cache-aware**: default to deferred
   invalidation (takes effect next session) with an opt-in `--now` flag (`/skills install --now`
   is the canonical pattern).

@@ -10,6 +10,7 @@ Covers:
 """
 
 import asyncio
+import json
 import hashlib
 import threading
 import time
@@ -614,6 +615,31 @@ class TestRunEvents:
                 # Should contain run.completed
                 assert "run.completed" in body
                 assert "Hello!" in body
+
+    @pytest.mark.asyncio
+    async def test_native_text_events_capture_each_attempt_identity(self, adapter):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            agent = MagicMock()
+            agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+            def create(**kwargs):
+                callback = kwargs["stream_delta_callback"]
+                def answer(*args, **kw):
+                    agent._stream_writer_token = 1
+                    callback("First draft")
+                    agent._stream_writer_token = 2
+                    callback("Replacement")
+                    return {"final_response": "Replacement"}
+                agent.run_conversation.side_effect = answer
+                return agent
+            with patch.object(adapter, "_create_agent", side_effect=create):
+                response = await cli.post("/v1/runs", json={"input": "hello"})
+                run_id = (await response.json())["run_id"]
+                response = await cli.get(f"/v1/runs/{run_id}/events")
+                values = [json.loads(line[5:]) for line in (await response.text()).splitlines()
+                          if line.startswith("data:")]
+                deltas = [v for v in values if v.get("event") == "message.delta"]
+                assert [(v["delta"], v["stream_id"]) for v in deltas] == [("First draft", 1), ("Replacement", 2)]
 
     @pytest.mark.asyncio
     async def test_completed_event_carries_served_runtime_and_cache_tokens(self, adapter):

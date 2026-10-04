@@ -83,6 +83,9 @@ def record_response_usage(
     # Token/cost accounting below stays gated on real usage, but the request itself
     # must remain observable.
     agent.session_api_calls += 1
+    # Iollo fork: provider-run searches of a profile with hosted tools, for the run report.
+    from agent.tool_profile import note_hosted_calls
+    note_hosted_calls(agent, response)
     if not (hasattr(response, 'usage') and response.usage):
         if getattr(compressor, "awaiting_real_usage_after_compression", False):
             # No usage -> cannot adjudicate the prior compaction; consume the

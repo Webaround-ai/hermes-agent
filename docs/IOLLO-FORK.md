@@ -5,15 +5,17 @@ Mac menu bar/local tools, supported by the personal cloud boxes. iOS and Desktop
 The Mac companion does not run the conversational agent.
 
 Cloud uses the pinned fork base image in `registry.fly.io/instinct-sandboxes`, then builds
-its own sandbox layer. At the 2026-10-03 source review the pin is **iollo-2026.9.24-rc10**,
+its own sandbox layer. At the 2026-10-04 source review the pin is **iollo-2026.9.24-rc13** (Hermes `e3682503cf`; PRs #22/#23/#24 are
+rc11/rc12/rc13). At the 2026-10-03 review it was **iollo-2026.9.24-rc10**,
 Hermes commit **a4976548790078dee821983d2bef6cc3c728fb62**. Cloud
 `sandbox/hermes-base.txt`, the Dockerfile fallback and an explicit build override determine
 that base; the final sandbox image and successful rollout determine what owners receive.
 
 The packaging sections below describe the existing full release workflow and its historical
 Mac Python runtime artifacts. A matching fork tag does not prove that workflow ran or that a
-GitHub release exists: rc7–rc10 were cloud runtime updates without published full runtime
-releases as of this review. Do not refresh parked clients or their runtime pins as part of
+GitHub release exists: rc7–rc13 were cloud runtime updates without published full runtime
+releases as of this review. The "Iollo release" workflow is disabled (2026-10-04), so tags do not build images; the base
+image is built by hand on Fly's remote builder (cloud `docs/DEPLOY.md`, "Building the Hermes base by hand"). Do not refresh parked clients or their runtime pins as part of
 routine cloud/menu bar work. Neither publishing a base nor creating a tag deploys boxes.
 Iollo managed boxes use cloud policy and deployment controls rather than the upstream
 `hermes update` command.
@@ -71,7 +73,7 @@ tests: `tests/agent/test_prompt_version.py` and the `prompt_version` cases in
 `tests/gateway/test_api_server_runs.py`. A turn a live Desktop Bot Chat owner executes (mailbox
 path) is not affected.
 
-## Per-run tool profile and turn-ending tools (2026-10-04, not released)
+## Per-run tool profile and turn-ending tools (2026-10-04, rc11, PR #22, merged; base image built by hand)
 
 `POST /v1/runs` accepts an optional `tool_profile` object: `name` (short identifier), `tools` (1-200
 tool names), `skills` (boolean, default true) and `note` (at most 600 characters, appended to each
@@ -106,9 +108,11 @@ auto-continue does not treat such a tail as interrupted (`transcript_tail_ended_
 `gateway/platforms/api_server_runs.py`; tests: `tests/agent/test_iollo_tool_profile_and_ended_turn.py`
 and the `tool_profile` cases in `tests/gateway/test_api_server_runs.py`.
 
-### Connector read tools and machine-run review (2026-10-04, branch `iollo-rc12`, not released)
+### Connector read tools and machine-run review (2026-10-04, rc12, PR #23, merged; `hosted_tools` in rc13, PR #24)
 
-Base `iollo-2026.9.24-rc11` (`5403c1749b`). Code evidence only; not deployed.
+Base `iollo-2026.9.24-rc11` (`5403c1749b`); rc12 is `25690aa809`, rc13 `e3682503cf` (adds `hosted_tools`: provider-executed
+tools such as the Responses `web_search`, appended to a run's requests while its profile holds). Code evidence; the
+cloud docs record which image the boxes run.
 
 - `tool_profile.tools` entries may be globs (`*` only, literal prefix of at least 4 characters, e.g.
   `mcp__notion__*`), resolved against the session's real tools on every request; a glob that matches

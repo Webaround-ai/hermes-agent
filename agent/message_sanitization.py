@@ -144,7 +144,9 @@ def sanitize_outbound_kwargs(agent: Any, api_kwargs: dict) -> None:
         # before the in-place strip so the retry never rewrites the canonical tool schemas.
         # A structural clone suffices: ``_sanitize_structure`` only rebinds str leaves
         # inside dict/list containers.
-        if api_kwargs.get("tools") is not None and api_kwargs["tools"] is getattr(agent, "tools", None):
+        # Iollo fork: a tool profile or the escape-tool filter sends a NEW list whose entries are still the
+        # canonical dicts, so clone whenever tools are present, not only when the list itself is agent.tools.
+        if api_kwargs.get("tools") is not None:
             # Lazy: conversation_loop imports this module (cycle).
             from agent.conversation_loop import _clone_message_for_send
 

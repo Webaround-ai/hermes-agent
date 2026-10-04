@@ -322,6 +322,70 @@ class TestStartRun:
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_tool_profile_reaches_the_run_agent_and_is_reported(self, adapter):
+        """Iollo fork: ``tool_profile`` is declared on the run's agent; the run reports it and its lift state."""
+        from agent.tool_profile import ToolProfile
+        app = _create_runs_app(adapter)
+        captured = {}
+        agent = self._capturing_agent(captured)
+        body = {"input": "hello", "tool_profile": {"name": "light", "tools": ["web_search", "show_widget"],
+                                                   "skills": False}}
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=agent):
+                resp = await cli.post("/v1/runs", json=body)
+                assert resp.status == 202
+                run_id = (await resp.json())["run_id"]
+                await self._wait_completed(cli, run_id)
+                status = await (await cli.get(f"/v1/runs/{run_id}")).json()
+        assert agent._tool_profile == ToolProfile("light", frozenset({"web_search", "show_widget"}), skills=False)
+        assert status["tool_profile"] == {"name": "light", "lifted": "", "api_calls": 0}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value, status, expected", [(True, 202, True), (None, 202, False), ("yes", 400, None)])
+    async def test_ends_turn_is_opt_in_per_run(self, adapter, value, status, expected):
+        app = _create_runs_app(adapter)
+        agent = self._capturing_agent({})
+        body = {"input": "hello", **({"ends_turn": value} if value is not None else {})}
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=agent):
+                resp = await cli.post("/v1/runs", json=body)
+                assert resp.status == status
+                if status == 202:
+                    await self._wait_completed(cli, (await resp.json())["run_id"])
+                else:
+                    assert (await resp.json())["error"]["code"] == "invalid_ends_turn"
+        if expected is not None:
+            assert agent._ends_turn_enabled is expected
+
+    @pytest.mark.asyncio
+    async def test_no_tool_profile_keeps_the_wire_shape(self, adapter):
+        app = _create_runs_app(adapter)
+        agent = self._capturing_agent({})
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=agent):
+                resp = await cli.post("/v1/runs", json={"input": "hello"})
+                run_id = (await resp.json())["run_id"]
+                await self._wait_completed(cli, run_id)
+                status = await (await cli.get(f"/v1/runs/{run_id}")).json()
+        assert agent._tool_profile is None
+        assert "tool_profile" not in status
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", [
+        "light", {"tools": []}, {"tools": ["ok", 3]}, {"tools": ["a b"]}, {"tools": ["x"], "skills": "no"},
+        {"name": "full", "skills": False},
+    ])
+    async def test_start_rejects_invalid_tool_profile(self, adapter, value):
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as mock_create:
+                resp = await cli.post("/v1/runs", json={"input": "hello", "tool_profile": value})
+                assert resp.status == 400
+                body = await resp.json()
+        assert body["error"]["code"] == "invalid_tool_profile"
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("author", ["dixie", ["dixie"], 7])
     async def test_start_rejects_non_object_author(self, adapter, author):
         app = _create_runs_app(adapter)

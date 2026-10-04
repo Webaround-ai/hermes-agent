@@ -108,6 +108,12 @@ def build_api_request(
     # require reasoning_content — re-apply the echo-back pad (idempotent) and re-render
     # the prompt-cache decoration for the current provider.
     agent._reapply_reasoning_echo_for_provider(api_messages)
+    # Iollo fork: a per-run tool profile projects only what this request sends (agent/tool_profile.py);
+    # the agent, its stored prompt and its tool pin stay the full set. Before cache decoration, so the
+    # markers land on the projected arrays.
+    from agent.tool_profile import project_system_message, project_tools
+    tools_for_api = project_tools(agent, tools_for_api if tools_for_api is not None else agent.tools)
+    api_messages = project_system_message(agent, api_messages)
     api_messages, _moa_prepared_request, tools_for_api = (
         _redecorate_prompt_cache_for_provider(
             agent, api_messages, system_message=system_message, moa_prepared=_moa_prepared_request,

@@ -71,6 +71,41 @@ tests: `tests/agent/test_prompt_version.py` and the `prompt_version` cases in
 `tests/gateway/test_api_server_runs.py`. A turn a live Desktop Bot Chat owner executes (mailbox
 path) is not affected.
 
+## Per-run tool profile and turn-ending tools (2026-10-04, not released)
+
+`POST /v1/runs` accepts an optional `tool_profile` object: `name` (short identifier), `tools` (1-200
+tool names), `skills` (boolean, default true) and `note` (at most 600 characters, appended to each
+profile-lifting tool's description in that run's requests, e.g. the capabilities only the full set
+has); anything else is a 400 `invalid_tool_profile`. The
+agent is built exactly as without it: the stored system prompt, the session tool pin, compression
+rebuilds and every persisted byte stay the full set. Only each provider request is projected
+(`build_api_request` in `agent/turn_api_request.py`, before cache decoration): `tools[]` keeps the
+named tools in the session's order plus tools registered `lifts_tool_profile=True`, and with
+`skills: false` the `## Skills` index block is cut from the system message (the identity, guidance
+and caller-context text before it stay byte-identical). Without a profile, `lifts_tool_profile` tools
+are never sent. A call to such a tool, or to any tool of the agent the profile left out, lifts the
+profile for the rest of the turn (the call runs as usual; the next request carries every tool and the
+skills index). Without `tools` (and `skills` absent or true) the run is only named: nothing is
+projected. The completed run reports `tool_profile: {name, lifted, api_calls}` only when one was
+requested, so a caller can compare input tokens per call across profiles.
+A provider switch between profiles changes `tools[]`, which most providers cache ahead of or with the
+system text, so the first request after a switch re-reads the prompt uncached; each profile's prefix
+is cached on its own.
+
+A tool may be registered `ends_turn=True` (or `ends_turn=predicate(args, result)`), also through
+`PluginContext.register_tool`. It only takes effect on a run that sends `ends_turn: true` on `/v1/runs`
+(boolean, default false, else 400 `invalid_ends_turn`), and never after a stop was requested during
+the round. On such a run, when every call of a tool round names such a tool, each has a result
+`agent.display._detect_tool_failure` does not flag (and its predicate says yes), and the assistant
+message carried visible text, the turn ends with that text (`turn_exit_reason` `tool_ended_turn`)
+instead of one more model call. Otherwise the loop continues as before, so a refused call reaches the
+model. Each call keeps its tool result; no duplicate closing assistant row is written
+(`assistant(tool_calls) → tool → user` is legal on every provider path), and the gateway's
+auto-continue does not treat such a tail as interrupted (`transcript_tail_ended_by_tool`). Code:
+`agent/tool_profile.py`, `agent/turn_tool_round.py`, `agent/turn_finalizer.py`,
+`gateway/platforms/api_server_runs.py`; tests: `tests/agent/test_iollo_tool_profile_and_ended_turn.py`
+and the `tool_profile` cases in `tests/gateway/test_api_server_runs.py`.
+
 ## Taking an upstream release
 
 Use an isolated clean worktree and record the old base before a deliberate upstream upgrade.

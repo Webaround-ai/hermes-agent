@@ -1619,6 +1619,7 @@ class TurnRunner:
         Returns (persist_user_message_override, persist_user_timestamp_override): real user text is
         kept separate from API-only recovery guidance so stale guidance never replays as user text.
         """
+        from agent.turn_tool_round import transcript_tail_ended_by_tool as _tail_ended_by_tool
         from gateway.run import (
             _auto_continue_freshness_window, _is_fresh_gateway_interruption,
             _last_transcript_timestamp, _prepare_resume_pending_message, build_resume_recovery_note,
@@ -1649,7 +1650,8 @@ class TurnRunner:
             ctx.message, persist_override = _prepare_resume_pending_message(
                 resume_reason, ctx.message, interactive=self._resume_note_interactive(),
             )
-        elif agent_history and agent_history[-1].get("role") == "tool" and interruption_is_fresh:
+        elif (agent_history and agent_history[-1].get("role") == "tool" and interruption_is_fresh
+              and not _tail_ended_by_tool(agent_history)):
             persist_override = ctx.message
             ctx.message = (
                 "[System note: A new message has arrived. The conversation "

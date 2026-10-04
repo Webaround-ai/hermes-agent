@@ -129,11 +129,35 @@ Base `iollo-2026.9.24-rc11` (`5403c1749b`). Code evidence only; not deployed.
   (`iollo_notes` has no turn sync), context-engine notification, micro-compaction, persistence.
   Session auto-titling (turn start, `title_generation` side model) still runs for a new api_server
   session. The curator is a time-based gateway housekeeping job, not per run.
+- Turn-ending on the OpenAI Responses path (gpt-6-luna): the reply the model writes beside
+  `show_widget`/`ask_owner` arrives as a `phase=commentary` message, which the adapter files under
+  reasoning, so the tool-call message had no content and no turn ever ended (production box: 0 of 31
+  `show_widget` and 0 of 6 `ask_owner` calls had content beside them). Now, on an `ends_turn` run whose
+  message has no content and whose calls all name turn-ending tools, `stage_tool_call_message`
+  (`agent/turn_tool_round.py` `_promote_commentary_reply`) makes that commentary the row's visible
+  content before the row is persisted and removes its flattened copy from `reasoning`; the exact
+  `codex_message_items` stay, so the Responses replay is unchanged (content is not replayed beside
+  them). If every call then succeeds, the turn ends with that text as `final_response` and it is
+  streamed once as `message.delta`; otherwise the loop continues as for a Claude message with text
+  beside tool calls. Claude paths carry no commentary items and are unchanged.
+- Progress events on `/v1/runs` (`gateway/platforms/api_server_run_progress.py`): `tool.generating
+  {tool}` when the model starts producing a tool call (the agent's `tool_gen_callback`, now wired for
+  runs; the name only, never arguments), repeated at most every 10 s while that call is still being
+  generated; `run.heartbeat` (no fields) at most every 12 s while the run is `running`, nothing else was
+  emitted, no tool is executing and the agent's activity clock moved (a streaming or waiting model call,
+  reasoning, compaction). A hung agent stays silent. Both update status `updated_at`/`last_event` like
+  any event (not persisted), go to the SSE queue only while a stream is open, never reach the
+  transcript or reply text, and are never sent while the run waits for an approval (a caller reads a
+  later `last_event` as the box having moved on). Cost: one sleeping asyncio task per active run.
+  Consumers that filter by event type (the iollo control plane's `_watch_tools`,
+  `_stream_registered_partials`) ignore both.
 - rc11 and older read the body with `.get`, so they ignore `read_tools` inside a profile they accept
   (a glob in `tools` fails their name check: 400) and ignore `skip_background_review`.
 - Tests: `tests/agent/test_iollo_tool_profile_and_ended_turn.py` (connector section),
   `tests/gateway/test_api_server_runs.py` (`skip_background_review`, globs/read_tools),
-  `tests/agent/test_codex_app_server_integration.py::TestSkipBackgroundReview`. Known unrelated
+  `tests/agent/test_codex_app_server_integration.py::TestSkipBackgroundReview`,
+  `tests/gateway/test_iollo_run_progress.py`, and the `responses_commentary` cases in
+  `tests/agent/test_iollo_tool_profile_and_ended_turn.py`. Known unrelated
   failure on the base: `TestCodexToolProgressBridge::test_session_wired_with_on_event_that_fires_tool_progress`.
 
 ## Taking an upstream release

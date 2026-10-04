@@ -143,6 +143,76 @@ def test_anything_else_continues_with_one_more_call(content, calls, results):
     assert transcript_tail_ended_by_tool(result["messages"]) is False
 
 
+def _responses_turn(commentary, calls):
+    """One OpenAI Responses reply (gpt-6-luna writes the reply beside its tool calls as a ``phase=commentary``
+    message, which the adapter files under reasoning). The fake chat client returns it as a chat completion
+    carrying the raw Responses object; ``_responses_normalizer`` hands it to the real Responses transport."""
+    output = ([SimpleNamespace(type="message", role="assistant", status="completed", phase="commentary", id="msg_1",
+                               content=[SimpleNamespace(type="output_text", text=commentary)])] if commentary else [])
+    output += [SimpleNamespace(type="function_call", status="completed", id=f"fc_{i}", call_id=f"call_{i}", name=n,
+                               arguments=a) for i, (n, a) in enumerate(calls)]
+    raw = SimpleNamespace(status="completed", output=output, output_text="")
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=None),
+                                                    finish_reason="tool_calls")],
+                           model="m", usage=None, _responses=raw)
+
+
+@pytest.fixture
+def _responses_normalizer(monkeypatch):
+    from agent.transports.chat_completions import ChatCompletionsTransport
+    from agent.transports.codex import ResponsesApiTransport
+    chat_normalize = ChatCompletionsTransport.normalize_response
+    responses = ResponsesApiTransport.__new__(ResponsesApiTransport)
+    responses._last_issuer_kind = responses._last_issuer_model = responses._last_wire_aliases = None
+
+    def normalize(self, response, **kwargs):
+        raw = getattr(response, "_responses", None)
+        if raw is None:
+            return chat_normalize(self, response, **kwargs)
+        normalized = ResponsesApiTransport.normalize_response(responses, raw)
+        assert normalized.content == "" and normalized.finish_reason == "tool_calls"
+        return normalized
+    monkeypatch.setattr(ChatCompletionsTransport, "normalize_response", normalize)
+
+
+def test_responses_commentary_beside_turn_ending_calls_ends_the_turn_with_that_text(_responses_normalizer):
+    agent = _agent(END, PLAIN)
+    deltas = []
+    agent.stream_delta_callback = deltas.append
+    reply = "Here are three ramen places near Chiado."
+    result = _run(agent, [_responses_turn(reply, [(END, "{}")])], {END: OK})
+    assert agent.client.chat.completions.create.call_count == 1
+    assert result["final_response"] == reply and result["turn_exit_reason"] == "tool_ended_turn"
+    rows = [m for m in result["messages"] if m.get("role") == "assistant" and m.get("tool_calls")]
+    # Stored once, as the visible text of the tool-call row; no flattened reasoning copy to replay again.
+    assert rows[-1]["content"] == reply and not (rows[-1].get("reasoning") or "").strip()
+    assert rows[-1]["codex_message_items"][0]["phase"] == "commentary"          # exact replay item kept
+    assert sum(1 for m in result["messages"] if reply in str(m.get("content") or "")) == 1
+    assert transcript_tail_ended_by_tool(result["messages"]) is True
+    assert "".join(d for d in deltas if d).strip() == reply                   # streamed like reply text, once
+
+
+@pytest.mark.parametrize("commentary, calls, results", [
+    ("", [(END, "{}")], {END: OK}),                                              # no commentary: continue
+    ("Here.", [(END, "{}"), (PLAIN, "{}")], {END: OK, PLAIN: OK}),               # a non-ending call: continue
+    ("Here.", [(END, "{}")], {END: BAD}),                                        # refused: the model fixes it
+])
+def test_responses_commentary_otherwise_continues(commentary, calls, results, _responses_normalizer):
+    agent = _agent(END, PLAIN)
+    result = _run(agent, [_responses_turn(commentary, calls), _response("Final.")], results)
+    assert agent.client.chat.completions.create.call_count == 2
+    assert result["final_response"] == "Final." and result["turn_exit_reason"] != "tool_ended_turn"
+
+
+def test_responses_commentary_is_left_alone_without_ends_turn(_responses_normalizer):
+    agent = _agent(END)
+    set_ends_turn(agent, False)
+    result = _run(agent, [_responses_turn("Here.", [(END, "{}")]), _response("Final.")], {END: OK})
+    assert result["final_response"] == "Final."
+    row = next(m for m in result["messages"] if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert not row.get("content") and "Here." in (row.get("reasoning") or "")
+
+
 def test_a_predicate_that_says_yes_ends_the_turn():
     agent = _agent(END_IF)
     result = _run(agent, [_response("Cards below.", [_call(END_IF, "c1", '{"container": "reply"}')])], {END_IF: OK})
@@ -279,7 +349,8 @@ def test_read_tools_never_include_a_tool_the_mcp_client_did_not_register(monkeyp
 
 def test_globs_in_tools_resolve_per_request_and_unknown_ones_are_ignored():
     agent = _agent(PLAIN, OTHER, ESCAPE)
-    set_tool_profile(agent, normalize_tool_profile({"name": "light", "tools": ["t_pl*", "zzzz*"]}))
+    # An unknown exact name (a relay tool an older box image lacks, e.g. search_answer) is ignored the same way.
+    set_tool_profile(agent, normalize_tool_profile({"name": "light", "tools": ["t_pl*", "zzzz*", "search_answer"]}))
     _run(agent, [_response("", [_call(PLAIN, "c1")]), _response("Answer.")], {PLAIN: OK})
     assert _sent(agent, 0)[0] == [PLAIN, ESCAPE]
     assert _sent(agent, 1)[0] == [PLAIN, ESCAPE]

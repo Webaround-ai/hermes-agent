@@ -28,6 +28,7 @@ from agent.tool_profile import (
     normalize_ends_turn, normalize_skip_background_review, normalize_tool_profile, set_ends_turn, set_tool_profile,
     tool_profile_report)
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
+from gateway.platforms.api_server_run_progress import RunProgress, pulse as _run_pulse
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 
 
@@ -271,6 +272,37 @@ def _mark_shutdown_requested(self) -> int:
     return marked
 
 
+def _note_progress(self, run_id: str, name: Optional[str]) -> None:
+    """Tell the run's progress state an event went out (iollo fork; no-op without one)."""
+    progress = self.__dict__.get("_run_progress", {}).get(run_id)
+    if progress is not None:
+        progress.note_event(name)
+
+
+def _live_status(self, run_id: str) -> Optional[str]:
+    status = self._run_statuses.get(run_id, {}).get("status")
+    return None if status is None or status in TERMINAL_STATUSES else str(status)
+
+
+def _start_run_progress(self, run: "_RunLaunch", loop: "asyncio.AbstractEventLoop") -> RunProgress:
+    """The run's progress state (iollo fork): ``tool.generating`` / ``run.heartbeat`` publish like every other run
+    event (status ``updated_at``/``last_event``, then the SSE queue), from any thread."""
+    run_id = run.run_id
+
+    def _emit(name: str, **fields: Any) -> None:
+        status = self._run_statuses.get(run_id, {}).get("status", "running")
+        if status != "running":
+            # Never over an approval request: a caller reads a later last_event as the box having moved on from it.
+            return
+        self._set_run_status(run_id, status, last_event=name)
+        with suppress(Exception):
+            loop.call_soon_threadsafe(run.put_event, _run_event(run_id, name, **fields))
+
+    progress = RunProgress(_emit)
+    self.__dict__.setdefault("_run_progress", {})[run_id] = progress
+    return progress
+
+
 def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop", *, _api_server):
     """Return a callback that pushes structured events to the run SSE queue."""
     redact_sensitive_text = _api_server.redact_sensitive_text
@@ -278,6 +310,7 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
     def _push(event: Dict[str, Any]) -> None:
         self._set_run_status(
             run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
+        _note_progress(self, run_id, event.get("event"))
         q = self._run_streams.get(run_id)
         if q is not None:
             with suppress(Exception):
@@ -915,6 +948,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             identity = getattr(self._active_run_agents.get(run_id), "_stream_writer_token", None)
             loop.call_soon_threadsafe(run.put_event, _run_event(
                 run_id, "message.delta", delta=delta, stream_id=identity if type(identity) is int else None))
+            _note_progress(self, run_id, "message.delta")
 
     def _interim_cb(text: str, *, already_streamed: bool = False) -> None:
         # Mid-turn assistant commentary (Codex ``phase="commentary"``, text beside tool calls),
@@ -925,6 +959,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         with suppress(Exception):
             loop.call_soon_threadsafe(run.put_event, _run_event(
                 run_id, "message.interim", text=text, already_streamed=bool(already_streamed)))
+            _note_progress(self, run_id, "message.interim")
 
     def _finish(status: str, extra: Optional[dict] = None, **fields: Any) -> None:
         """Terminal status, then best-effort ``run.<status>`` event; key order is wire shape."""
@@ -937,6 +972,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         with suppress(Exception):
             run.put_event(_run_event(run_id, f"run.{status}", **fields, **extra))
 
+    pulse_task = None
     try:
         # Shutdown landed between admission and the task's first tick: nothing to
         # interrupt yet, and starting a turn now would outlive the gateway.
@@ -947,10 +983,14 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if run_id in self._stopping_run_ids:
             _finish("cancelled")
             return
+        progress = _start_run_progress(self, run, loop)
         with self._profile_scope(run.request_profile):
             agent = self._create_agent(
                 stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
                 interim_assistant_callback=_interim_cb, **run.agent_kwargs)
+        # Iollo fork: tool.generating / run.heartbeat (gateway/platforms/api_server_run_progress.py).
+        agent.tool_gen_callback = progress.tool_generating
+        pulse_task = loop.create_task(_run_pulse(progress, agent, lambda: _live_status(self, run_id)))
         set_prompt_version(agent, run.prompt_version)
         set_tool_profile(agent, run.tool_profile)
         set_ends_turn(agent, run.ends_turn)
@@ -993,6 +1033,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         logger.exception("[api_server] run %s failed", run_id)
         _finish("failed", error=_redact_api_error_text(exc))
     finally:
+        if pulse_task is not None:
+            pulse_task.cancel()
+        self.__dict__.get("_run_progress", {}).pop(run_id, None)
         # On cancellation (/stop) the executor thread may still block on an approval
         # Event; unregistering releases it. Idempotent on normal completion.
         _unregister_approval_notify(run.approval_session_key)

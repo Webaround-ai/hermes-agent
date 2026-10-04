@@ -223,6 +223,24 @@ def _recover_final_from_stream(agent, final_response, interrupted, failed) -> Tu
     return final_response, False
 
 
+def _turn_text_already_in_tool_call_row(agent, messages, final_response) -> bool:
+    """True when a turn-ending tool round ended this turn and its tool-call row carries ``final_response``."""
+    if getattr(agent, "_turn_ended_by_tool", False) is not True or not isinstance(final_response, str):
+        return False
+    for msg in reversed(messages or []):
+        if not isinstance(msg, dict):
+            return False
+        if msg.get("role") == "tool":
+            continue
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            return False
+        content = msg.get("content")
+        if not isinstance(content, str):
+            return False
+        return agent._strip_think_blocks(content).strip() == final_response.strip()
+    return False
+
+
 def _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream) -> None:
     """Shape the transcript tail before the durable snapshot (scaffolding already dropped
     and ``final_response`` already stream-recovered by the caller)."""
@@ -247,7 +265,12 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, _recove
         # verification candidate that matches the final response is not duplicated at budget exhaustion.
         # (#65919 §7)
         _tail = messages[-1] if messages else None
-        if not isinstance(_tail, dict) or _tail.get("role") != "assistant":
+        if _turn_text_already_in_tool_call_row(agent, messages, final_response):
+            # Iollo fork ``tool_ended_turn``: the reply is the visible text of the tool-call row these tool
+            # results answer; a second copy would teach the model to repeat itself, and
+            # ``assistant(tool_calls) -> tool -> user`` is legal on every provider path (agent/AGENTS.md).
+            pass
+        elif not isinstance(_tail, dict) or _tail.get("role") != "assistant":
             append_message(messages, {"role": "assistant", "content": final_response})
         elif (
             _tail.get("content") != final_response
@@ -386,6 +409,8 @@ def _explain_abnormal_exit(agent, final_response, _turn_exit_reason, preserved_v
             not _is_empty_terminal
             and not preserved_verification_fallback
             and not str(_turn_exit_reason).startswith("text_response")
+            # Iollo fork: a turn-ending tool round's text is a complete reply, however short.
+            and str(_turn_exit_reason) != "tool_ended_turn"
             and len(_stripped) <= 24
             and _stripped[-1:] not in _SENTENCE_END
         )

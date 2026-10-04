@@ -24,6 +24,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from agent.prompt_version import normalize_prompt_version, set_prompt_version
+from agent.tool_profile import normalize_tool_profile, set_tool_profile, tool_profile_report
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 
@@ -462,6 +463,7 @@ class _RunLaunch:
     browser_control_transport_family: Any
     turn_author: Optional[Dict[str, Any]] = None  # memory-attribution label only; grants nothing
     prompt_version: Optional[str] = None  # caller's prompt-text version (agent/prompt_version.py)
+    tool_profile: Any = None  # iollo fork: this run's tool profile (agent/tool_profile.py), None = every tool
 
     @property
     def approval_session_key(self) -> str:
@@ -620,6 +622,10 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         prompt_version = normalize_prompt_version(body.get("prompt_version"))
     except ValueError as exc:
         return _json_error(_openai_error, str(exc), code="invalid_prompt_version", status=400)
+    try:
+        tool_profile = normalize_tool_profile(body.get("tool_profile"))
+    except ValueError as exc:
+        return _json_error(_openai_error, str(exc), code="invalid_tool_profile", status=400)
     conversation_history, instructions, stored_session_id, history_err = (
         _resolve_conversation_history(self, body, raw_input, _openai_error=_openai_error))
     if history_err is not None:
@@ -698,7 +704,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
-        turn_author=turn_author, prompt_version=prompt_version)
+        turn_author=turn_author, prompt_version=prompt_version, tool_profile=tool_profile)
     self._activate_admitted_request()
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -933,6 +939,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
                 interim_assistant_callback=_interim_cb, **run.agent_kwargs)
         set_prompt_version(agent, run.prompt_version)
+        set_tool_profile(agent, run.tool_profile)
         self._active_run_agents[run_id] = agent
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         result, usage, served_runtime = await _submit_api_worker(
@@ -953,7 +960,11 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 runtime=served_runtime, requested_runtime=requested if any(requested.values()) else None,
                 route_source=("model_routes" if run.agent_kwargs.get("route")
                               else "raw_request" if any(requested.values()) else "global"))
-            _finish(status, fields, output=result.get("final_response", ""), usage=usage, runtime=served_runtime)
+            # A run that asked for a tool profile reports it (and whether a call lifted it); others keep the wire shape.
+            profile_report = tool_profile_report(agent, result.get("api_calls"))
+            extra_fields = {"tool_profile": profile_report} if profile_report else {}
+            _finish(status, fields, output=result.get("final_response", ""), usage=usage, runtime=served_runtime,
+                    **extra_fields)
     except asyncio.CancelledError:
         _finish("cancelled")
         raise

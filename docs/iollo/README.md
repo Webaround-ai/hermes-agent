@@ -29,6 +29,7 @@ does not identify a deployed image. See cloud
 | Runtime seam | Source | Integration rule |
 |---|---|---|
 | Durable runs | `gateway/platforms/api_server_runs.py` | Preserve declared session key, idempotency, provider/effort, envelope context and prompt version |
+| Tool profile / turn-ending tools | `agent/tool_profile.py`, `agent/turn_tool_round.py`, `agent/turn_api_request.py` | Per-run `tool_profile` projects requests only (agent, stored prompt, pin stay full); `ends_turn` ends a succeeded text+tool round; see [IOLLO-FORK](../IOLLO-FORK.md) |
 | Prompt refresh | `agent/prompt_version.py`, `agent/conversation_loop.py` | Changed declared version rebuilds stored prompt and re-pins current tools once; transcript/session retained; compression inherits version |
 | Sessions | `hermes_state.py`, API server session handlers | Full owner-box transcript, distinct from control-plane retained copies |
 | Delegation | `tools/delegate_tool_config.py`, related delegate/escalate modules | Policy supplies tiers and required gates; no secret or budget bypass |

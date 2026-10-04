@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
+import json
 import logging
 from typing import Any, Dict, Optional, Tuple
 
@@ -83,6 +84,11 @@ def run_tool_round(
         return _verdict("return", _tvv.result)
     if _tvv.action == "continue":
         return _verdict("continue")
+
+    # Iollo fork: a call outside this run's tool profile (or to its escape tool) lifts the profile, so the
+    # call runs as usual and the next request carries every tool (agent/tool_profile.py).
+    from agent.tool_profile import lift_tool_profile_for_calls
+    lift_tool_profile_for_calls(agent, assistant_message.tool_calls)
 
     # Post-call guardrails.
     assistant_message.tool_calls = agent._deduplicate_tool_calls(
@@ -177,6 +183,18 @@ def run_tool_round(
                     agent.stream_delta_callback(None)
         return _verdict("break")
 
+    # Iollo fork: a round made only of turn-ending tools that all succeeded, whose message carried visible
+    # text, ends the turn with that text instead of one more model call (``tool_ended_turn``).
+    ended_text = tool_ended_turn_text(agent, assistant_message, messages)
+    if ended_text:
+        _turn_exit_reason = "tool_ended_turn"
+        final_response = ended_text
+        agent._turn_ended_by_tool = True
+        # The text already went out as this message's stream deltas / interim commentary.
+        agent._response_was_previewed = True
+        agent._session_messages = messages
+        return _verdict("break")
+
     # Reset per-turn retry counters so one truncation can't poison the turn.
     truncated_tool_call_retries = 0
     # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n" when real
@@ -216,6 +234,57 @@ def run_tool_round(
     # the gateway kills the session before the next activity touch fires (#69559, #69131).
     agent._touch_activity(f"tool results posted, continuing iteration #{api_call_count}")
     return _verdict("continue")
+
+
+def tool_ended_turn_text(agent: Any, assistant_message: Any, messages: Any) -> Optional[str]:
+    """The visible text that ends the turn after this round, or ``None`` to continue as usual.
+
+    Every call must name a tool registered ``ends_turn`` (``True``, or a ``predicate(args, result)`` that
+    returns True), have a recorded result that is not a failure (``agent.display._detect_tool_failure``),
+    and the assistant message must carry visible text. Any doubt continues the loop: a failed or refused
+    call reaches the model, which can fix it."""
+    calls = list(getattr(assistant_message, "tool_calls", None) or [])
+    if not calls:
+        return None
+    from agent.conversation_loop import _STALE_MARKER_RE
+    raw = assistant_message.content if isinstance(getattr(assistant_message, "content", None), str) else ""
+    if not raw or _STALE_MARKER_RE.fullmatch(raw.strip()) or not agent._has_content_after_think_block(raw):
+        return None
+    text = agent._strip_think_blocks(raw).strip()
+    if not text:
+        return None
+    from agent.display import _detect_tool_failure
+    from tools.registry import registry
+    ids = {coalesce_tool_call_id(tc) for tc in calls}
+    results = {}
+    for msg in reversed(messages or []):
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            break
+        if msg.get("tool_call_id") in ids:
+            results.setdefault(msg.get("tool_call_id"), msg.get("content"))
+    for tc in calls:
+        name = getattr(tc.function, "name", "")
+        entry = registry.get_entry(name) if name else None
+        rule = getattr(entry, "ends_turn", False) if entry is not None else False
+        if not rule:
+            return None
+        result = results.get(coalesce_tool_call_id(tc))
+        if result is None or _detect_tool_failure(name, result)[0]:
+            return None
+        if callable(rule):
+            args = tc.function.arguments
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args.strip() else {}
+                except ValueError:
+                    return None
+            try:
+                if not rule(args if isinstance(args, dict) else {}, result):
+                    return None
+            except Exception:  # noqa: BLE001 - a broken predicate never ends a turn
+                logger.debug("ends_turn predicate for %s raised", name, exc_info=True)
+                return None
+    return text
 
 
 def stage_tool_call_message(
@@ -294,3 +363,31 @@ def stage_tool_call_message(
         and agent._interim_assistant_visible_text(previous_msg) == current_interim_visible
     )
     return assistant_msg, duplicate_previous_interim
+
+
+def transcript_tail_ended_by_tool(history: Any) -> bool:
+    """True when ``history`` ends with a turn a turn-ending tool round closed (``tool_ended_turn``): the tool
+    rows answer an assistant row with visible text whose calls are all ``ends_turn`` tools and none failed.
+    Such a tail is a finished turn, not an interrupted one (gateway auto-continue must not fire)."""
+    if not isinstance(history, list) or not history:
+        return False
+    from agent.display import _detect_tool_failure
+    from tools.registry import registry
+    i = len(history) - 1
+    results = []
+    while i >= 0 and isinstance(history[i], dict) and history[i].get("role") == "tool":
+        results.append(history[i])
+        i -= 1
+    if not results or i < 0 or not isinstance(history[i], dict):
+        return False
+    row = history[i]
+    content = row.get("content")
+    if (row.get("role") != "assistant" or not row.get("tool_calls") or not isinstance(content, str)
+            or not content.strip()):
+        return False
+    for call in row.get("tool_calls") or []:
+        name = str(((call or {}).get("function") or {}).get("name") or "")
+        entry = registry.get_entry(name) if name else None
+        if entry is None or not getattr(entry, "ends_turn", False):
+            return False
+    return not any(_detect_tool_failure(str(r.get("name") or ""), r.get("content"))[0] for r in results)

@@ -358,6 +358,46 @@ class TestStartRun:
             assert agent._ends_turn_enabled is expected
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("value, status, expected", [(True, 202, True), (None, 202, False), (False, 202, False),
+                                                         ("yes", 400, None)])
+    async def test_skip_background_review_is_opt_in_per_run(self, adapter, value, status, expected):
+        """Iollo fork: a machine-initiated run (home feed curation) turns the post-turn review off for itself."""
+        app = _create_runs_app(adapter)
+        agent = self._capturing_agent({})
+        agent.skip_background_review = False
+        body = {"input": "hello", **({"skip_background_review": value} if value is not None else {})}
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=agent):
+                resp = await cli.post("/v1/runs", json=body)
+                assert resp.status == status
+                if status == 202:
+                    await self._wait_completed(cli, (await resp.json())["run_id"])
+                else:
+                    assert (await resp.json())["error"]["code"] == "invalid_skip_background_review"
+        if expected is not None:
+            assert agent.skip_background_review is expected
+
+    @pytest.mark.asyncio
+    async def test_glob_and_read_tools_reach_the_run_agent_and_the_report(self, adapter):
+        """Iollo fork: connector globs and ``read_tools`` are kept on the profile; the report carries the read
+        outcome (none here: the fake agent never sends a request)."""
+        app = _create_runs_app(adapter)
+        agent = self._capturing_agent({})
+        body = {"input": "hello", "tool_profile": {"name": "light", "tools": ["web_search", "mcp__notion__*"],
+                                                   "read_tools": ["mcp__linear__*"], "skills": False}}
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=agent):
+                resp = await cli.post("/v1/runs", json=body)
+                assert resp.status == 202
+                run_id = (await resp.json())["run_id"]
+                await self._wait_completed(cli, run_id)
+                status = await (await cli.get(f"/v1/runs/{run_id}")).json()
+        assert agent._tool_profile.patterns == ("mcp__notion__*",)
+        assert agent._tool_profile.read_patterns == ("mcp__linear__*",)
+        assert status["tool_profile"]["read_tools"] == {"status": "none", "tools": 0, "chars": 0,
+                                                        "patterns": {"mcp__linear__*": 0}}
+
+    @pytest.mark.asyncio
     async def test_no_tool_profile_keeps_the_wire_shape(self, adapter):
         app = _create_runs_app(adapter)
         agent = self._capturing_agent({})
@@ -373,7 +413,8 @@ class TestStartRun:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("value", [
         "light", {"tools": []}, {"tools": ["ok", 3]}, {"tools": ["a b"]}, {"tools": ["x"], "skills": "no"},
-        {"name": "full", "skills": False},
+        {"name": "full", "skills": False}, {"tools": ["*"]}, {"tools": ["mc*"]}, {"tools": ["x"], "read_tools": "y"},
+        {"tools": ["x"], "read_tools": ["a?b*"]}, {"name": "full", "read_tools": ["mcp__x__*"]},
     ])
     async def test_start_rejects_invalid_tool_profile(self, adapter, value):
         app = _create_runs_app(adapter)

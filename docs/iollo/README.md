@@ -29,12 +29,13 @@ does not identify a deployed image. See cloud
 | Runtime seam | Source | Integration rule |
 |---|---|---|
 | Durable runs | `gateway/platforms/api_server_runs.py` | Preserve declared session key, idempotency, provider/effort, envelope context and prompt version |
-| Tool profile / turn-ending tools | `agent/tool_profile.py`, `agent/turn_tool_round.py`, `agent/turn_api_request.py` | Per-run `tool_profile` projects requests only (agent, stored prompt, pin stay full); `ends_turn` ends a succeeded text+tool round; see [IOLLO-FORK](../IOLLO-FORK.md) |
+| Tool profile / turn-ending tools | `agent/tool_profile.py`, `agent/turn_tool_round.py`, `agent/turn_api_request.py` | Per-run `tool_profile` projects requests only (agent, stored prompt, pin stay full); `ends_turn` ends a succeeded text+tool round; rc12 branch: globs and `read_tools` (annotated read-only MCP tools, budgeted) and per-run `skip_background_review`; see [IOLLO-FORK](../IOLLO-FORK.md) |
 | Prompt refresh | `agent/prompt_version.py`, `agent/conversation_loop.py` | Changed declared version rebuilds stored prompt and re-pins current tools once; transcript/session retained; compression inherits version |
 | Sessions | `hermes_state.py`, API server session handlers | Full owner-box transcript, distinct from control-plane retained copies |
 | Delegation | `tools/delegate_tool_config.py`, related delegate/escalate modules | Policy supplies tiers and required gates; no secret or budget bypass |
 | Provider adapters | `agent/` provider transports | Preserve selected transport and cache prefix; OpenAI configuration updates are appended and validated |
-| Native text stream | `gateway/platforms/api_server_runs.py` | `message.delta` events carry `stream_id` captured on the producing thread; consumers replace retried drafts |
+| Native text stream | `gateway/platforms/api_server_runs.py` | `message.delta` events carry `stream_id` captured on the producing thread; consumers replace retried drafts; rc12 branch: Responses commentary beside turn-ending calls becomes the visible reply |
+| Run progress events | `gateway/platforms/api_server_run_progress.py` | rc12 branch: `tool.generating {tool}` (name only, ≤ every 10 s) and `run.heartbeat` (≤ every 12 s while the agent is alive and silent); status `last_event` moves, never during an approval, never in transcripts |
 | Recorded voice | `gateway/platforms/api_server_audio.py`, [voice API](voice-api.md) | Opt-in authenticated transcription/read-aloud; bounded temporary audio and busy accounting; no agent turn |
 
 Read the relevant nested AGENTS.md before touching each runtime area. When changing an integration

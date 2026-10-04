@@ -190,6 +190,14 @@ def run_tool_round(
         _turn_exit_reason = "tool_ended_turn"
         final_response = ended_text
         agent._turn_ended_by_tool = True
+        if getattr(agent, "_tool_ended_turn_commentary", None) == ended_text:
+            # Promoted Responses commentary only went out as interim commentary: stream it once as reply text,
+            # like a Claude reply's own deltas (the run's output carries it either way).
+            with suppress(Exception):
+                agent._fire_stream_delta(ended_text)
+            if agent.stream_delta_callback:
+                with suppress(Exception):
+                    agent.stream_delta_callback(None)
         # The text already went out as this message's stream deltas / interim commentary.
         agent._response_was_previewed = True
         agent._session_messages = messages
@@ -294,6 +302,50 @@ def tool_ended_turn_text(agent: Any, assistant_message: Any, messages: Any) -> O
     return text
 
 
+def _all_turn_ending(calls: Any) -> bool:
+    """Every call names a tool registered ``ends_turn`` (a predicate counts; it is judged after the round)."""
+    from tools.registry import registry
+    for tc in calls:
+        name = getattr(getattr(tc, "function", None), "name", "")
+        entry = registry.get_entry(name) if name else None
+        if entry is None or not getattr(entry, "ends_turn", False):
+            return False
+    return bool(calls)
+
+
+def _promote_commentary_reply(agent: Any, assistant_message: Any, assistant_msg: Dict[str, Any]) -> str:
+    """Iollo fork: on the OpenAI Responses path the text the model writes beside its tool calls arrives as
+    ``phase=commentary`` message items, which the adapter files under reasoning, so a turn-ending round
+    (``show_widget``/``ask_owner`` with the reply beside them) had no visible text and never ended. On a run that
+    asked for ``ends_turn``, when the message has no content and every call names a turn-ending tool, that
+    commentary becomes the row's visible content (and leaves its flattened reasoning copy) before the row is
+    persisted. The exact ``codex_message_items`` stay, so the Responses replay is byte-identical (content is not
+    replayed beside them). Returns the promoted text ("" when nothing changed); Claude paths never carry
+    commentary items."""
+    agent._tool_ended_turn_commentary = None
+    if getattr(agent, "_ends_turn_enabled", False) is not True or getattr(agent, "_interrupt_requested", False) is True:
+        return ""
+    content = assistant_message.content if isinstance(getattr(assistant_message, "content", None), str) else ""
+    if content.strip() or not _all_turn_ending(list(getattr(assistant_message, "tool_calls", None) or [])):
+        return ""
+    from agent.history_commentary import _commentary_items, _without_flattened_commentary, visible_commentary
+    raw = _commentary_items({"codex_message_items": getattr(assistant_message, "codex_message_items", None)})
+    parts = [p for text in raw if (p := visible_commentary(text, strip_thinking=agent._strip_think_blocks))]
+    text = "\n\n".join(parts).strip()
+    if not text:
+        return ""
+    assistant_message.content = text
+    assistant_msg["content"] = text
+    for holder, get, put in ((assistant_msg, assistant_msg.get, assistant_msg.__setitem__),
+                             (assistant_message, lambda k: getattr(assistant_message, k, None),
+                              lambda k, v: setattr(assistant_message, k, v))):
+        reasoning = get("reasoning")
+        if isinstance(reasoning, str) and reasoning:
+            put("reasoning", _without_flattened_commentary(reasoning, raw).strip() or None)
+    agent._tool_ended_turn_commentary = text
+    return text
+
+
 def stage_tool_call_message(
     agent: Any, *, assistant_message: Any, finish_reason: Any, messages: Any
 ) -> Tuple[Dict[str, Any], bool]:
@@ -308,6 +360,7 @@ def stage_tool_call_message(
     from agent.conversation_loop import _STALE_MARKER_RE
 
     assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
+    _promote_commentary_reply(agent, assistant_message, assistant_msg)
 
     turn_content = assistant_message.content or ""
 

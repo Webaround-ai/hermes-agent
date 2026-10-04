@@ -11,7 +11,8 @@ import pytest
 
 from agent.tool_dispatch_helpers import make_tool_result_message
 from agent.tool_profile import (
-    ToolProfile, lift_tool_profile_for_calls, normalize_ends_turn, normalize_tool_profile, project_system_message,
+    ToolProfile, lift_tool_profile_for_calls, normalize_ends_turn, normalize_skip_background_review,
+    normalize_tool_profile, project_system_message,
     project_tools, set_ends_turn,
     set_tool_profile, strip_skills_block, tool_profile_report,
 )
@@ -142,6 +143,76 @@ def test_anything_else_continues_with_one_more_call(content, calls, results):
     assert transcript_tail_ended_by_tool(result["messages"]) is False
 
 
+def _responses_turn(commentary, calls):
+    """One OpenAI Responses reply (gpt-6-luna writes the reply beside its tool calls as a ``phase=commentary``
+    message, which the adapter files under reasoning). The fake chat client returns it as a chat completion
+    carrying the raw Responses object; ``_responses_normalizer`` hands it to the real Responses transport."""
+    output = ([SimpleNamespace(type="message", role="assistant", status="completed", phase="commentary", id="msg_1",
+                               content=[SimpleNamespace(type="output_text", text=commentary)])] if commentary else [])
+    output += [SimpleNamespace(type="function_call", status="completed", id=f"fc_{i}", call_id=f"call_{i}", name=n,
+                               arguments=a) for i, (n, a) in enumerate(calls)]
+    raw = SimpleNamespace(status="completed", output=output, output_text="")
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=None),
+                                                    finish_reason="tool_calls")],
+                           model="m", usage=None, _responses=raw)
+
+
+@pytest.fixture
+def _responses_normalizer(monkeypatch):
+    from agent.transports.chat_completions import ChatCompletionsTransport
+    from agent.transports.codex import ResponsesApiTransport
+    chat_normalize = ChatCompletionsTransport.normalize_response
+    responses = ResponsesApiTransport.__new__(ResponsesApiTransport)
+    responses._last_issuer_kind = responses._last_issuer_model = responses._last_wire_aliases = None
+
+    def normalize(self, response, **kwargs):
+        raw = getattr(response, "_responses", None)
+        if raw is None:
+            return chat_normalize(self, response, **kwargs)
+        normalized = ResponsesApiTransport.normalize_response(responses, raw)
+        assert normalized.content == "" and normalized.finish_reason == "tool_calls"
+        return normalized
+    monkeypatch.setattr(ChatCompletionsTransport, "normalize_response", normalize)
+
+
+def test_responses_commentary_beside_turn_ending_calls_ends_the_turn_with_that_text(_responses_normalizer):
+    agent = _agent(END, PLAIN)
+    deltas = []
+    agent.stream_delta_callback = deltas.append
+    reply = "Here are three ramen places near Chiado."
+    result = _run(agent, [_responses_turn(reply, [(END, "{}")])], {END: OK})
+    assert agent.client.chat.completions.create.call_count == 1
+    assert result["final_response"] == reply and result["turn_exit_reason"] == "tool_ended_turn"
+    rows = [m for m in result["messages"] if m.get("role") == "assistant" and m.get("tool_calls")]
+    # Stored once, as the visible text of the tool-call row; no flattened reasoning copy to replay again.
+    assert rows[-1]["content"] == reply and not (rows[-1].get("reasoning") or "").strip()
+    assert rows[-1]["codex_message_items"][0]["phase"] == "commentary"          # exact replay item kept
+    assert sum(1 for m in result["messages"] if reply in str(m.get("content") or "")) == 1
+    assert transcript_tail_ended_by_tool(result["messages"]) is True
+    assert "".join(d for d in deltas if d).strip() == reply                   # streamed like reply text, once
+
+
+@pytest.mark.parametrize("commentary, calls, results", [
+    ("", [(END, "{}")], {END: OK}),                                              # no commentary: continue
+    ("Here.", [(END, "{}"), (PLAIN, "{}")], {END: OK, PLAIN: OK}),               # a non-ending call: continue
+    ("Here.", [(END, "{}")], {END: BAD}),                                        # refused: the model fixes it
+])
+def test_responses_commentary_otherwise_continues(commentary, calls, results, _responses_normalizer):
+    agent = _agent(END, PLAIN)
+    result = _run(agent, [_responses_turn(commentary, calls), _response("Final.")], results)
+    assert agent.client.chat.completions.create.call_count == 2
+    assert result["final_response"] == "Final." and result["turn_exit_reason"] != "tool_ended_turn"
+
+
+def test_responses_commentary_is_left_alone_without_ends_turn(_responses_normalizer):
+    agent = _agent(END)
+    set_ends_turn(agent, False)
+    result = _run(agent, [_responses_turn("Here.", [(END, "{}")]), _response("Final.")], {END: OK})
+    assert result["final_response"] == "Final."
+    row = next(m for m in result["messages"] if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert not row.get("content") and "Here." in (row.get("reasoning") or "")
+
+
 def test_a_predicate_that_says_yes_ends_the_turn():
     agent = _agent(END_IF)
     result = _run(agent, [_response("Cards below.", [_call(END_IF, "c1", '{"container": "reply"}')])], {END_IF: OK})
@@ -206,6 +277,103 @@ def test_a_call_outside_the_profile_lifts_it_for_the_rest_of_the_turn(called, re
     assert system == SYSTEM
     assert tool_profile_report(agent)["lifted"] == reason
     assert result["final_response"] == "Done with all tools."
+
+
+# --- connector globs and read tools --------------------------------------------------------------------------
+
+LIST, GET, CREATE, LYING, NOTION = ("mcp__linear__list_issues", "mcp__linear__get_issue", "mcp__linear__create_issue",
+                                    "mcp__linear__updateIssue", "mcp__notion__search")
+
+
+@pytest.fixture
+def _mcp(monkeypatch):
+    """Discovery records as the MCP client leaves them: provenance per registry name and readOnlyHint per raw name
+    (Notion published no annotations)."""
+    import tools.mcp_tool as core
+    from tools.mcp_tool_scope import _resolve_server_key
+    for name, server in ((LIST, "linear"), (GET, "linear"), (CREATE, "linear"), (LYING, "linear"),
+                         (NOTION, "notion")):
+        monkeypatch.setitem(core._mcp_tool_server_names, name, server)
+    monkeypatch.setitem(core._tool_read_only_hints, _resolve_server_key("linear"),
+                        {"list_issues": True, "get_issue": True, "create_issue": False, "updateIssue": True})
+
+
+def _connector_agent():
+    agent = _agent(PLAIN, LIST, CREATE, GET, LYING, NOTION, ESCAPE)
+    agent._skip_mcp_refresh = True
+    return agent
+
+
+def test_read_tools_send_only_annotated_read_only_tools_in_session_order(_mcp):
+    agent = _connector_agent()
+    set_tool_profile(agent, normalize_tool_profile({"name": "light", "tools": [PLAIN], "skills": False,
+                                                    "read_tools": ["mcp__linear__*", "mcp__notion__*"]}))
+    _run(agent, [_response("Answer.")], {})
+    names, _ = _sent(agent, 0)
+    # No create (readOnlyHint false), no updateIssue (annotated read-only but a write verb), no Notion (no annotation).
+    assert names == [PLAIN, LIST, GET, ESCAPE]
+    report = tool_profile_report(agent, 1)["read_tools"]
+    assert report["status"] == "ok" and report["tools"] == 2 and report["chars"] > 0
+    assert report["patterns"] == {"mcp__linear__*": 2, "mcp__notion__*": 0}
+
+
+def test_a_read_tool_call_keeps_the_profile_and_a_write_call_lifts_it(_mcp):
+    agent = _connector_agent()
+    set_tool_profile(agent, ToolProfile("light", frozenset({PLAIN}), skills=False, read_patterns=("mcp__linear__*",)))
+    _run(agent, [_response("", [_call(LIST, "c1")]), _response("", [_call(CREATE, "c2")]), _response("Done.")],
+         {LIST: OK, CREATE: OK})
+    assert _sent(agent, 1)[0] == [PLAIN, LIST, GET, ESCAPE]
+    assert _sent(agent, 2)[0] == [PLAIN, LIST, CREATE, GET, LYING, NOTION]
+    assert tool_profile_report(agent)["lifted"] == "tool:" + CREATE
+
+
+def test_read_tools_over_budget_send_none_of_them(_mcp, monkeypatch):
+    monkeypatch.setattr("agent.tool_profile.MAX_READ_TOOLS", 1)
+    agent = _connector_agent()
+    set_tool_profile(agent, ToolProfile("light", frozenset({PLAIN}), skills=False, read_patterns=("mcp__linear__*",)))
+    _run(agent, [_response("Answer.")], {})
+    assert _sent(agent, 0)[0] == [PLAIN, ESCAPE]
+    assert tool_profile_report(agent)["read_tools"]["status"] == "over_budget"
+
+
+def test_read_tools_never_include_a_tool_the_mcp_client_did_not_register(monkeypatch):
+    """Without the MCP client's records (or with it not imported) nothing counts as read-only: fail closed."""
+    import tools.mcp_tool as core
+    monkeypatch.setattr(core, "_mcp_tool_server_names", {})
+    agent = _connector_agent()
+    set_tool_profile(agent, ToolProfile("light", frozenset({PLAIN}), read_patterns=("mcp__linear__*",)))
+    _run(agent, [_response("Answer.")], {})
+    assert _sent(agent, 0)[0] == [PLAIN, ESCAPE]
+    assert tool_profile_report(agent)["read_tools"]["status"] == "none"
+
+
+def test_globs_in_tools_resolve_per_request_and_unknown_ones_are_ignored():
+    agent = _agent(PLAIN, OTHER, ESCAPE)
+    # An unknown exact name (a relay tool an older box image lacks, e.g. search_answer) is ignored the same way.
+    set_tool_profile(agent, normalize_tool_profile({"name": "light", "tools": ["t_pl*", "zzzz*", "search_answer"]}))
+    _run(agent, [_response("", [_call(PLAIN, "c1")]), _response("Answer.")], {PLAIN: OK})
+    assert _sent(agent, 0)[0] == [PLAIN, ESCAPE]
+    assert _sent(agent, 1)[0] == [PLAIN, ESCAPE]
+    assert "read_tools" not in tool_profile_report(agent)
+
+
+def test_normalize_keeps_globs_and_read_tools_apart():
+    profile = normalize_tool_profile({"name": "light", "tools": ["web_search", "mcp__x__*", "mcp__x__*"],
+                                      "read_tools": ["mcp__y__*", "mcp__z__get"]})
+    assert profile == ToolProfile("light", frozenset({"web_search"}), True, "", ("mcp__x__*",),
+                                  ("mcp__y__*", "mcp__z__get"))
+    for bad in ({"tools": ["*"]}, {"tools": ["mc*"]}, {"tools": ["x"], "read_tools": ["a?bc*"]},
+                {"tools": ["x"], "read_tools": "mcp__y__*"}, {"tools": ["x"], "read_tools": ["mcp__y__*"] * 21},
+                {"name": "full", "read_tools": ["mcp__y__*"]}):
+        with pytest.raises(ValueError):
+            normalize_tool_profile(bad)
+
+
+def test_normalize_skip_background_review():
+    assert normalize_skip_background_review(None) is False
+    assert normalize_skip_background_review(True) is True
+    with pytest.raises(ValueError):
+        normalize_skip_background_review("yes")
 
 
 # --- helpers -------------------------------------------------------------------------------------------------

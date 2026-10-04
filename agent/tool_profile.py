@@ -13,13 +13,24 @@ to any tool the agent has that the profile does not name, lifts the profile for 
 (``lift_tool_profile_for_calls``): that call runs as usual and the next request carries every tool and the skills
 index. A wrong light guess costs one model call, never a lost reply. The run reports the profile it asked for and
 whether it was lifted (``tool_profile_report``).
+
+A ``tools`` entry may also be a glob (``*`` only, e.g. ``mcp__notion__*``), resolved against the session's real
+tools on every request; a pattern that matches nothing is ignored. ``read_tools`` (globs or names) adds a
+connector's READ tools only: an MCP tool whose discovery-time ``readOnlyHint`` is exactly True and whose own name
+carries no write verb; anything else (no annotation, utilities, built-ins) stays with every tool. The read tools are
+bounded per request (``MAX_READ_TOOLS`` tools, ``MAX_READ_CHARS`` schema characters, about 4k tokens): over either
+bound none of them is sent (all or nothing, so the request stays stable) and the report says so. Calls run through
+the same handlers as ever, so approvals and the MCP trust gate apply unchanged.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
+import json
 import logging
 import re
+import sys
 from typing import Any, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -28,6 +39,19 @@ MAX_PROFILE_TOOLS = 200
 MAX_NAME_LENGTH = 64
 MAX_NOTE_LENGTH = 600
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+# A glob: ``*`` wildcards only, after a literal prefix of at least 4 characters (never ``*`` or ``mc*`` alone).
+_GLOB_RE = re.compile(r"^[A-Za-z0-9_.:-]{4,}[A-Za-z0-9_.:*-]*$")
+MAX_READ_PATTERNS = 20
+MAX_READ_TOOLS = 12
+MAX_READ_CHARS = 16_000
+# A read tool whose own name (not its server's) carries one of these words is never sent as a read tool, whatever its
+# annotation says (defence in depth against a wrong readOnlyHint; the call-time gates apply either way).
+_WRITE_WORDS = frozenset((
+    "add", "append", "approve", "archive", "assign", "book", "cancel", "clear", "close", "comment", "complete",
+    "create", "delete", "deploy", "disable", "duplicate", "edit", "enable", "execute", "import", "insert", "invite",
+    "merge", "modify", "move", "pay", "post", "publish", "purchase", "put", "reject", "remove", "rename", "reply",
+    "reset", "restart", "restore", "revoke", "run", "save", "schedule", "send", "set", "share", "start", "stop",
+    "submit", "transfer", "trigger", "update", "upload", "upsert", "write"))
 
 # The block ``agent.prompt_builder._render_skills_block`` renders (non-oneshot variant), plus its optional
 # ``[names only]`` note. Matched from its heading to its fixed closing sentence.
@@ -46,6 +70,8 @@ class ToolProfile:
     # Appended to each profile-lifting tool's description in this run's requests: what exists only with every
     # tool (the caller keeps it stable, so the profile's prefix stays cached).
     note: str = ""
+    patterns: tuple = ()        # globs from ``tools``, resolved per request
+    read_patterns: tuple = ()   # ``read_tools``: names/globs whose read-only MCP tools are sent, within the budget
 
 
 def normalize_tool_profile(value: Any) -> Optional[ToolProfile]:
@@ -59,20 +85,31 @@ def normalize_tool_profile(value: Any) -> Optional[ToolProfile]:
         raise ValueError("'tool_profile.name' must be a short identifier")
     tools = value.get("tools")
     if tools is None:
-        if value.get("skills", True) is not True:
+        if value.get("skills", True) is not True or value.get("read_tools"):
             raise ValueError("'tool_profile' without tools keeps every tool and the skills index")
         return ToolProfile(name=name, tools=None)
     if not isinstance(tools, list) or not tools or len(tools) > MAX_PROFILE_TOOLS:
         raise ValueError(f"'tool_profile.tools' must be a list of 1-{MAX_PROFILE_TOOLS} tool names")
-    if any(not isinstance(t, str) or not _NAME_RE.match(t) for t in tools):
-        raise ValueError("'tool_profile.tools' must contain tool names")
+    if any(not _valid_entry(t) for t in tools):
+        raise ValueError("'tool_profile.tools' must contain tool names or globs")
+    reads = value.get("read_tools", [])
+    if not isinstance(reads, list) or len(reads) > MAX_READ_PATTERNS or any(not _valid_entry(t) for t in reads):
+        raise ValueError(f"'tool_profile.read_tools' must be a list of at most {MAX_READ_PATTERNS} names or globs")
     skills = value.get("skills", True)
     if not isinstance(skills, bool):
         raise ValueError("'tool_profile.skills' must be a boolean")
     note = value.get("note", "")
     if not isinstance(note, str) or len(note) > MAX_NOTE_LENGTH:
         raise ValueError(f"'tool_profile.note' must be a string of at most {MAX_NOTE_LENGTH} characters")
-    return ToolProfile(name=name, tools=frozenset(tools), skills=skills, note=" ".join(note.split()))
+    return ToolProfile(name=name, tools=frozenset(t for t in tools if "*" not in t), skills=skills,
+                       note=" ".join(note.split()), patterns=tuple(dict.fromkeys(t for t in tools if "*" in t)),
+                       read_patterns=tuple(dict.fromkeys(reads)))
+
+
+def _valid_entry(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) > MAX_NAME_LENGTH:
+        return False
+    return bool(_GLOB_RE.match(value)) if "*" in value else bool(_NAME_RE.match(value))
 
 
 def set_tool_profile(agent: Any, profile: Optional[ToolProfile]) -> None:
@@ -81,6 +118,8 @@ def set_tool_profile(agent: Any, profile: Optional[ToolProfile]) -> None:
     agent._tool_profile = profile if profile is not None and profile.tools is not None else None
     agent._tool_profile_requested = profile
     agent._tool_profile_lifted = None
+    agent._tool_profile_allowed = None
+    agent._tool_profile_reads = None
 
 
 def active_tool_profile(agent: Any) -> Optional[ToolProfile]:
@@ -118,10 +157,69 @@ def project_tools(agent: Any, tools: Optional[List[Any]]) -> Optional[List[Any]]
     if profile is None:
         keep = [t for t, n in zip(tools, names) if n not in lifting]
     else:
+        allowed, reads = _resolve(profile, tools, names, lifting)
+        agent._tool_profile_allowed = allowed
+        if reads is not None:
+            agent._tool_profile_reads = reads
         keep = [_with_note(t, profile.note) if n in lifting else t
-                for t, n in zip(tools, names) if n in profile.tools or n in lifting]
+                for t, n in zip(tools, names) if n in allowed or n in lifting]
         return keep
     return tools if len(keep) == len(tools) else keep
+
+
+def _matches(name: str, patterns: Iterable[str]) -> bool:
+    return any(fnmatchcase(name, p) if "*" in p else name == p for p in patterns)
+
+
+def _resolve(profile: ToolProfile, tools: List[Any], names: List[str], lifting: set):
+    """The names this request may declare under ``profile`` (a frozenset) and the read-tools report (None without
+    ``read_tools``): named tools, glob matches, then read tools within the budget."""
+    allowed = {n for n in names if n and n not in lifting and (n in profile.tools or _matches(n, profile.patterns))}
+    if not profile.read_patterns:
+        return frozenset(allowed), None
+    counts = {p: 0 for p in profile.read_patterns}
+    reads, chars = [], 0
+    for tool, n in zip(tools, names):
+        if not n or n in allowed or n in lifting:
+            continue
+        hit = next((p for p in profile.read_patterns if _matches(n, (p,))), None)
+        if hit is None or not _read_only_tool(n):
+            continue
+        counts[hit] += 1
+        reads.append(n)
+        chars += len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False, default=str))
+    status = "ok" if reads else "none"
+    if len(reads) > MAX_READ_TOOLS or chars > MAX_READ_CHARS:
+        status = "over_budget"
+    else:
+        allowed.update(reads)
+    return frozenset(allowed), {"status": status, "tools": len(reads), "chars": chars, "patterns": counts}
+
+
+def _name_words(raw: str) -> set:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(raw))
+    return {w for w in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if w}
+
+
+def _read_only_tool(name: str) -> bool:
+    """True only for a registered MCP tool whose server marked it ``readOnlyHint: true`` at discovery (the record the
+    call-time trust gate reads) and whose own name has no write verb. Fails closed."""
+    if "tools.mcp_tool" not in sys.modules:   # nothing imported the MCP client, so no MCP tool is registered
+        return False
+    try:
+        from tools import mcp_tool as core
+        from tools.mcp_tool_schema import mcp_prefixed_tool_name
+        from tools.mcp_tool_scope import _resolve_server_key
+        server = core._mcp_tool_server_names.get(name)
+        if not server:
+            return False
+        hints = core._tool_read_only_hints.get(_resolve_server_key(server), {})
+        for raw, read_only in list(hints.items()):
+            if read_only is True and mcp_prefixed_tool_name(server, raw) == name:
+                return not (_name_words(raw) & _WRITE_WORDS)
+    except Exception:
+        logger.debug("read tool check failed for %s", name, exc_info=True)
+    return False
 
 
 def _with_note(tool: Any, note: str) -> Any:
@@ -199,7 +297,10 @@ def lift_tool_profile_for_calls(agent: Any, tool_calls: Iterable[Any]) -> bool:
         if isinstance(name, str):
             names.append(name)
     lifting = _lifting_names(names)
-    outside = [n for n in names if n in valid and (n not in profile.tools or n in lifting)]
+    allowed = getattr(agent, "_tool_profile_allowed", None)
+    if not isinstance(allowed, frozenset):   # no request projected yet: names and globs only
+        allowed = frozenset(n for n in names if n in profile.tools or _matches(n, profile.patterns))
+    outside = [n for n in names if n in valid and (n not in allowed or n in lifting)]
     if not outside:
         return False
     reason = "escape" if any(n in lifting for n in outside) else "tool:" + outside[0]
@@ -222,6 +323,17 @@ def set_ends_turn(agent: Any, enabled: bool) -> None:
     agent._ends_turn_enabled = bool(enabled)
 
 
+def normalize_skip_background_review(value: Any) -> bool:
+    """Request ``skip_background_review`` -> bool (absent: False). A machine-initiated run in its own session (the
+    home feed curation) asks for no post-turn memory/skill review, for this run only (``agent.skip_background_review``,
+    the flag cron runs already set)."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError("'skip_background_review' must be a boolean")
+    return value
+
+
 def tool_profile_report(agent: Any, api_calls: Any = None) -> Optional[dict]:
     """``{"name", "lifted", "api_calls"}`` for a run that asked for a profile, else ``None`` (wire shape
     unchanged). ``api_calls`` lets a caller compare input tokens per model call across profiles."""
@@ -230,4 +342,10 @@ def tool_profile_report(agent: Any, api_calls: Any = None) -> Optional[dict]:
         return None
     lifted = getattr(agent, "_tool_profile_lifted", None)
     calls = api_calls if isinstance(api_calls, int) and not isinstance(api_calls, bool) else 0
-    return {"name": requested.name, "lifted": lifted or "", "api_calls": calls}
+    report = {"name": requested.name, "lifted": lifted or "", "api_calls": calls}
+    if requested.read_patterns:
+        # {"status": ok | none | over_budget, "tools", "chars", "patterns": {pattern: read tools found}}
+        reads = getattr(agent, "_tool_profile_reads", None)
+        report["read_tools"] = reads if isinstance(reads, dict) else {
+            "status": "none", "tools": 0, "chars": 0, "patterns": {p: 0 for p in requested.read_patterns}}
+    return report

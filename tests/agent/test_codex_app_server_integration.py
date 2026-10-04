@@ -812,3 +812,17 @@ class TestCodexToolProgressBridge:
 
         assert "on_event" in captured_init and captured_init["on_event"] is not None
         assert ("tool.started", "exec_command", "pytest") in events
+
+
+class TestSkipBackgroundReview:
+    """The codex runtime honours ``skip_background_review`` like the chat_completions finalizer (cron runs, iollo
+    machine-initiated runs such as the home feed curation)."""
+
+    @pytest.mark.parametrize("skip, spawned", [(False, True), (True, False)])
+    def test_skill_review_respects_the_flag(self, fake_session, skip, spawned):
+        agent = _make_codex_agent(skip_background_review=skip)
+        agent._skill_nudge_interval, agent._iters_since_skill = 1, 5
+        agent.valid_tool_names = set(agent.valid_tool_names or ()) | {"skill_manage"}
+        with patch.object(agent, "_spawn_background_review", return_value=None) as spawn:
+            agent.run_conversation("hello there")
+        assert spawn.called is spawned

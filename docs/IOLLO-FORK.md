@@ -106,6 +106,36 @@ auto-continue does not treat such a tail as interrupted (`transcript_tail_ended_
 `gateway/platforms/api_server_runs.py`; tests: `tests/agent/test_iollo_tool_profile_and_ended_turn.py`
 and the `tool_profile` cases in `tests/gateway/test_api_server_runs.py`.
 
+### Connector read tools and machine-run review (2026-10-04, branch `iollo-rc12`, not released)
+
+Base `iollo-2026.9.24-rc11` (`5403c1749b`). Code evidence only; not deployed.
+
+- `tool_profile.tools` entries may be globs (`*` only, literal prefix of at least 4 characters, e.g.
+  `mcp__notion__*`), resolved against the session's real tools on every request; a glob that matches
+  nothing is ignored. New `read_tools` (at most 20 names/globs; only with `tools`): adds the matching
+  tools that are MCP tools whose discovery-time `readOnlyHint` is exactly true (the
+  `_tool_read_only_hints` record the call-time trust gate reads) and whose own raw MCP name carries no
+  write verb (`_WRITE_WORDS`: create, update, delete, send, …, also camelCase). No annotation, a
+  utility tool or a built-in never counts. Budget per request: at most `MAX_READ_TOOLS` (12) read tools
+  and `MAX_READ_CHARS` (16,000 schema characters, about 4k tokens); over either, none is sent (all or
+  nothing, so the request stays stable). Calling a sent read tool keeps the profile; calling any other
+  tool lifts it as before. The report adds `read_tools: {status: ok|none|over_budget, tools, chars,
+  patterns: {pattern: count}}` only when `read_tools` was asked. Calls run through the same handlers,
+  so approvals and MCP trust gates are unchanged. Stored prompt and tool pin are untouched.
+- `skip_background_review` (boolean, default false, else 400 `invalid_skip_background_review`) on
+  `POST /v1/runs` sets `agent.skip_background_review` for that run only (the flag cron already uses):
+  no post-turn memory/skill review fork. The codex app-server runtime now honours the flag too (it
+  ignored it before, cron included). Other end-of-turn work is unchanged: external memory sync
+  (`iollo_notes` has no turn sync), context-engine notification, micro-compaction, persistence.
+  Session auto-titling (turn start, `title_generation` side model) still runs for a new api_server
+  session. The curator is a time-based gateway housekeeping job, not per run.
+- rc11 and older read the body with `.get`, so they ignore `read_tools` inside a profile they accept
+  (a glob in `tools` fails their name check: 400) and ignore `skip_background_review`.
+- Tests: `tests/agent/test_iollo_tool_profile_and_ended_turn.py` (connector section),
+  `tests/gateway/test_api_server_runs.py` (`skip_background_review`, globs/read_tools),
+  `tests/agent/test_codex_app_server_integration.py::TestSkipBackgroundReview`. Known unrelated
+  failure on the base: `TestCodexToolProgressBridge::test_session_wired_with_on_event_that_fires_tool_progress`.
+
 ## Taking an upstream release
 
 Use an isolated clean worktree and record the old base before a deliberate upstream upgrade.

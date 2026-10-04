@@ -25,7 +25,8 @@ except ImportError:
 
 from agent.prompt_version import normalize_prompt_version, set_prompt_version
 from agent.tool_profile import (
-    normalize_ends_turn, normalize_tool_profile, set_ends_turn, set_tool_profile, tool_profile_report)
+    normalize_ends_turn, normalize_skip_background_review, normalize_tool_profile, set_ends_turn, set_tool_profile,
+    tool_profile_report)
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 
@@ -466,6 +467,7 @@ class _RunLaunch:
     prompt_version: Optional[str] = None  # caller's prompt-text version (agent/prompt_version.py)
     tool_profile: Any = None  # iollo fork: this run's tool profile (agent/tool_profile.py), None = every tool
     ends_turn: bool = False  # iollo fork: turn-ending tools may end this run's turn (agent/turn_tool_round.py)
+    skip_background_review: bool = False  # iollo fork: no post-turn memory/skill review for this run only
 
     @property
     def approval_session_key(self) -> str:
@@ -632,6 +634,10 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         ends_turn = normalize_ends_turn(body.get("ends_turn"))
     except ValueError as exc:
         return _json_error(_openai_error, str(exc), code="invalid_ends_turn", status=400)
+    try:
+        skip_background_review = normalize_skip_background_review(body.get("skip_background_review"))
+    except ValueError as exc:
+        return _json_error(_openai_error, str(exc), code="invalid_skip_background_review", status=400)
     conversation_history, instructions, stored_session_id, history_err = (
         _resolve_conversation_history(self, body, raw_input, _openai_error=_openai_error))
     if history_err is not None:
@@ -711,7 +717,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
         turn_author=turn_author, prompt_version=prompt_version, tool_profile=tool_profile,
-        ends_turn=ends_turn)
+        ends_turn=ends_turn, skip_background_review=skip_background_review)
     self._activate_admitted_request()
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -948,6 +954,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         set_prompt_version(agent, run.prompt_version)
         set_tool_profile(agent, run.tool_profile)
         set_ends_turn(agent, run.ends_turn)
+        if run.skip_background_review:
+            # Only ever switched on: an agent built with the flag (cron) keeps it.
+            agent.skip_background_review = True
         self._active_run_agents[run_id] = agent
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         result, usage, served_runtime = await _submit_api_worker(

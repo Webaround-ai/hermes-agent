@@ -243,6 +243,13 @@ def tool_ended_turn_text(agent: Any, assistant_message: Any, messages: Any) -> O
     returns True), have a recorded result that is not a failure (``agent.display._detect_tool_failure``),
     and the assistant message must carry visible text. Any doubt continues the loop: a failed or refused
     call reaches the model, which can fix it."""
+    # Opt-in per run (``ends_turn: true`` on /v1/runs): skills and flows that write records after the reply's cards
+    # (task_update after show_widget) must keep their next round on every other run.
+    if getattr(agent, "_ends_turn_enabled", False) is not True:
+        return None
+    # A stop requested during the round wins: the next iteration reports the turn cancelled.
+    if getattr(agent, "_interrupt_requested", False) is True:
+        return None
     calls = list(getattr(assistant_message, "tool_calls", None) or [])
     if not calls:
         return None

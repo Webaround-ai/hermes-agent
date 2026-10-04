@@ -209,6 +209,19 @@ def lift_tool_profile_for_calls(agent: Any, tool_calls: Iterable[Any]) -> bool:
     return True
 
 
+def normalize_ends_turn(value: Any) -> bool:
+    """Request ``ends_turn`` -> bool (absent: False). Turn-ending tools end a turn only on runs that ask for it."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ValueError("'ends_turn' must be a boolean")
+    return value
+
+
+def set_ends_turn(agent: Any, enabled: bool) -> None:
+    agent._ends_turn_enabled = bool(enabled)
+
+
 def tool_profile_report(agent: Any, api_calls: Any = None) -> Optional[dict]:
     """``{"name", "lifted", "api_calls"}`` for a run that asked for a profile, else ``None`` (wire shape
     unchanged). ``api_calls`` lets a caller compare input tokens per model call across profiles."""

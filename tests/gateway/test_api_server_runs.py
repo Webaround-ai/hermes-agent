@@ -341,6 +341,23 @@ class TestStartRun:
         assert status["tool_profile"] == {"name": "light", "lifted": "", "api_calls": 0}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("value, status, expected", [(True, 202, True), (None, 202, False), ("yes", 400, None)])
+    async def test_ends_turn_is_opt_in_per_run(self, adapter, value, status, expected):
+        app = _create_runs_app(adapter)
+        agent = self._capturing_agent({})
+        body = {"input": "hello", **({"ends_turn": value} if value is not None else {})}
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=agent):
+                resp = await cli.post("/v1/runs", json=body)
+                assert resp.status == status
+                if status == 202:
+                    await self._wait_completed(cli, (await resp.json())["run_id"])
+                else:
+                    assert (await resp.json())["error"]["code"] == "invalid_ends_turn"
+        if expected is not None:
+            assert agent._ends_turn_enabled is expected
+
+    @pytest.mark.asyncio
     async def test_no_tool_profile_keeps_the_wire_shape(self, adapter):
         app = _create_runs_app(adapter)
         agent = self._capturing_agent({})

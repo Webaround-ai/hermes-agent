@@ -11,7 +11,8 @@ import pytest
 
 from agent.tool_dispatch_helpers import make_tool_result_message
 from agent.tool_profile import (
-    ToolProfile, lift_tool_profile_for_calls, normalize_tool_profile, project_system_message, project_tools,
+    ToolProfile, lift_tool_profile_for_calls, normalize_ends_turn, normalize_tool_profile, project_system_message,
+    project_tools, set_ends_turn,
     set_tool_profile, strip_skills_block, tool_profile_report,
 )
 from agent.turn_tool_round import transcript_tail_ended_by_tool
@@ -65,6 +66,7 @@ def _agent(*names):
     agent._use_prompt_caching = False
     agent.compression_enabled = False
     agent.save_trajectories = False
+    set_ends_turn(agent, True)      # the ends_turn tests' run asked for it; see test_ends_turn_is_opt_in_per_run
     return agent
 
 
@@ -261,3 +263,56 @@ def test_a_named_profile_without_tools_projects_nothing_but_reports():
     assert names == [PLAIN, OTHER]
     assert system == SYSTEM
     assert tool_profile_report(agent, 1) == {"name": "full", "lifted": "", "api_calls": 1}
+
+
+def test_ends_turn_is_opt_in_per_run():
+    """Off unless the run asks (/v1/runs ``ends_turn: true``): flows write task records after the reply's cards."""
+    agent = _agent(END)
+    set_ends_turn(agent, False)
+    result = _run(agent, [_response("Here.", [_call(END, "c1")]), _response("Final.")], {END: OK})
+    assert agent.client.chat.completions.create.call_count == 2
+    assert result["final_response"] == "Final."
+    assert normalize_ends_turn(None) is False and normalize_ends_turn(True) is True
+    with pytest.raises(ValueError):
+        normalize_ends_turn("yes")
+
+
+def test_a_stop_during_the_round_is_not_turned_into_a_completed_reply():
+    agent = _agent(END)
+    agent.client.chat.completions.create.side_effect = [_response("Here.", [_call(END, "c1")]), _response("x")]
+
+    def _execute(assistant_message, messages, effective_task_id, api_call_count=0):
+        messages.append(make_tool_result_message(END, OK, "c1"))
+        agent._interrupt_requested = True
+
+    with (
+        patch.object(agent, "_persist_session"), patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_execute_tool_calls", side_effect=_execute),
+        patch("agent.conversation_loop._restore_or_build_system_prompt"),
+    ):
+        result = agent.run_conversation("hi")
+    assert result["turn_exit_reason"] != "tool_ended_turn"
+    assert result["interrupted"] is True
+
+
+def test_a_tool_ended_turn_on_the_last_allowed_call_is_completed():
+    agent = _agent(END)
+    agent.max_iterations = 1
+    result = _run(agent, [_response("Here are three.", [_call(END, "c1")])], {END: OK})
+    assert result["turn_exit_reason"] == "tool_ended_turn"
+    assert result["completed"] is True and result["final_response"] == "Here are three."
+
+
+def test_ascii_recovery_never_rewrites_the_canonical_tool_schemas():
+    from agent.message_sanitization import sanitize_outbound_kwargs
+    agent = _agent(PLAIN, ESCAPE)
+    agent.tools[0]["function"]["description"] = "caf\u00e9"
+    canonical = agent.tools[0]["function"]["description"]
+    set_tool_profile(agent, None)
+    projected = project_tools(agent, agent.tools)
+    assert projected is not agent.tools and projected[0] is agent.tools[0]
+    agent._force_ascii_payload = True
+    kwargs = {"tools": projected, "messages": []}
+    sanitize_outbound_kwargs(agent, kwargs)
+    assert agent.tools[0]["function"]["description"] == canonical

@@ -93,7 +93,9 @@ system text, so the first request after a switch re-reads the prompt uncached; e
 is cached on its own.
 
 A tool may be registered `ends_turn=True` (or `ends_turn=predicate(args, result)`), also through
-`PluginContext.register_tool`. When every call of a tool round names such a tool, each has a result
+`PluginContext.register_tool`. It only takes effect on a run that sends `ends_turn: true` on `/v1/runs`
+(boolean, default false, else 400 `invalid_ends_turn`), and never after a stop was requested during
+the round. On such a run, when every call of a tool round names such a tool, each has a result
 `agent.display._detect_tool_failure` does not flag (and its predicate says yes), and the assistant
 message carried visible text, the turn ends with that text (`turn_exit_reason` `tool_ended_turn`)
 instead of one more model call. Otherwise the loop continues as before, so a refused call reaches the

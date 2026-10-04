@@ -21,6 +21,16 @@ carries no write verb; anything else (no annotation, utilities, built-ins) stays
 bounded per request (``MAX_READ_TOOLS`` tools, ``MAX_READ_CHARS`` schema characters, about 4k tokens): over either
 bound none of them is sent (all or nothing, so the request stays stable) and the report says so. Calls run through
 the same handlers as ever, so approvals and the MCP trust gate apply unchanged.
+
+``hosted_tools`` (iollo, 2026-10-04): provider-executed tools added to this run's requests while the profile holds,
+today only OpenAI's ``{"type": "web_search"}`` (optional ``search_context_size``, an approximate ``user_location``
+and ``filters.allowed_domains``). They are appended after the projected function tools, last and in the caller's
+order, replacing a client function of the same name for that request (they collide on the endpoint), only on
+the native OpenAI Responses transport (never the ChatGPT Codex backend, Copilot or xAI, never chat
+completions, so a Claude fallback or a worker never sees them). Nothing about them is persisted: ``web_search_call``
+output items are not replayed (store=False), so a later turn without the tool, or on another model, replays plain
+text. A lifted profile drops them with the rest of the projection. The run report counts the searches the provider
+ran (``hosted_calls``), because the provider bills them per call on top of tokens.
 """
 
 from __future__ import annotations
@@ -44,6 +54,13 @@ _GLOB_RE = re.compile(r"^[A-Za-z0-9_.:-]{4,}[A-Za-z0-9_.:*-]*$")
 MAX_READ_PATTERNS = 20
 MAX_READ_TOOLS = 12
 MAX_READ_CHARS = 16_000
+MAX_HOSTED_TOOLS = 2
+MAX_ALLOWED_DOMAINS = 20
+_HOSTED_TOOL_TYPES = frozenset({"web_search"})
+_SEARCH_CONTEXT_SIZES = frozenset({"low", "medium", "high"})
+_LOCATION_FIELDS = {"country": 2, "city": 64, "region": 64, "timezone": 64}
+_COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
+_DOMAIN_RE = re.compile(r"^[a-z0-9.-]{1,253}$")
 # A read tool whose own name (not its server's) carries one of these words is never sent as a read tool, whatever its
 # annotation says (defence in depth against a wrong readOnlyHint; the call-time gates apply either way).
 _WRITE_WORDS = frozenset((
@@ -72,6 +89,7 @@ class ToolProfile:
     note: str = ""
     patterns: tuple = ()        # globs from ``tools``, resolved per request
     read_patterns: tuple = ()   # ``read_tools``: names/globs whose read-only MCP tools are sent, within the budget
+    hosted_tools: tuple = ()    # provider-executed tools (validated dicts) appended on the native Responses route
 
 
 def normalize_tool_profile(value: Any) -> Optional[ToolProfile]:
@@ -85,7 +103,7 @@ def normalize_tool_profile(value: Any) -> Optional[ToolProfile]:
         raise ValueError("'tool_profile.name' must be a short identifier")
     tools = value.get("tools")
     if tools is None:
-        if value.get("skills", True) is not True or value.get("read_tools"):
+        if value.get("skills", True) is not True or value.get("read_tools") or value.get("hosted_tools"):
             raise ValueError("'tool_profile' without tools keeps every tool and the skills index")
         return ToolProfile(name=name, tools=None)
     if not isinstance(tools, list) or not tools or len(tools) > MAX_PROFILE_TOOLS:
@@ -103,7 +121,104 @@ def normalize_tool_profile(value: Any) -> Optional[ToolProfile]:
         raise ValueError(f"'tool_profile.note' must be a string of at most {MAX_NOTE_LENGTH} characters")
     return ToolProfile(name=name, tools=frozenset(t for t in tools if "*" not in t), skills=skills,
                        note=" ".join(note.split()), patterns=tuple(dict.fromkeys(t for t in tools if "*" in t)),
-                       read_patterns=tuple(dict.fromkeys(reads)))
+                       read_patterns=tuple(dict.fromkeys(reads)),
+                       hosted_tools=_normalize_hosted_tools(value.get("hosted_tools", [])))
+
+
+def _normalize_hosted_tools(value: Any) -> tuple:
+    """``hosted_tools`` -> a tuple of clean dicts (only the known fields, rebuilt). Raises ``ValueError``."""
+    if not isinstance(value, list) or len(value) > MAX_HOSTED_TOOLS:
+        raise ValueError(f"'tool_profile.hosted_tools' must be a list of at most {MAX_HOSTED_TOOLS} tools")
+    out = []
+    for tool in value:
+        if not isinstance(tool, dict) or tool.get("type") not in _HOSTED_TOOL_TYPES:
+            raise ValueError("'tool_profile.hosted_tools' entries must be {\"type\": \"web_search\", ...}")
+        unknown = set(tool) - {"type", "search_context_size", "user_location", "filters"}
+        if unknown:
+            raise ValueError(f"'tool_profile.hosted_tools' has unknown fields: {sorted(unknown)}")
+        clean: dict = {"type": tool["type"]}
+        size = tool.get("search_context_size")
+        if size is not None:
+            if size not in _SEARCH_CONTEXT_SIZES:
+                raise ValueError("'search_context_size' must be low, medium or high")
+            clean["search_context_size"] = size
+        location = tool.get("user_location")
+        if location is not None:
+            clean["user_location"] = _normalize_location(location)
+        filters = tool.get("filters")
+        if filters is not None:
+            domains = filters.get("allowed_domains") if isinstance(filters, dict) else None
+            if (not isinstance(filters, dict) or set(filters) != {"allowed_domains"} or not isinstance(domains, list)
+                    or not 0 < len(domains) <= MAX_ALLOWED_DOMAINS
+                    or any(not isinstance(d, str) or not _DOMAIN_RE.match(d) for d in domains)):
+                raise ValueError("'filters' must be {\"allowed_domains\": [lower-case domains]}")
+            clean["filters"] = {"allowed_domains": list(dict.fromkeys(domains))}
+        out.append(clean)
+    return tuple(out)
+
+
+def _normalize_location(value: Any) -> dict:
+    """An approximate location only: country (ISO 3166-1 alpha-2), city, region, IANA timezone; nothing finer."""
+    if not isinstance(value, dict) or value.get("type", "approximate") != "approximate":
+        raise ValueError("'user_location' must be an approximate location")
+    unknown = set(value) - {"type", *_LOCATION_FIELDS}
+    if unknown:
+        raise ValueError(f"'user_location' has unknown fields: {sorted(unknown)}")
+    clean = {"type": "approximate"}
+    for key, limit in _LOCATION_FIELDS.items():
+        field = value.get(key)
+        if field is None:
+            continue
+        if not isinstance(field, str) or not field.strip() or len(field) > limit:
+            raise ValueError(f"'user_location.{key}' must be a short string")
+        if key == "country" and not _COUNTRY_RE.match(field):
+            raise ValueError("'user_location.country' must be an ISO 3166-1 alpha-2 code")
+        clean[key] = field.strip()
+    return clean
+
+
+def hosted_tools_for_request(agent: Any) -> List[dict]:
+    """Fresh copies of the active profile's hosted tools for this request, or ``[]``: only while the profile holds
+    and only on the native OpenAI Responses transport (not the ChatGPT Codex backend, Copilot or xAI)."""
+    profile = active_tool_profile(agent)
+    if profile is None or not profile.hosted_tools or getattr(agent, "api_mode", None) != "codex_responses":
+        return []
+    try:
+        if agent._is_codex_backend() or agent._is_copilot_url():
+            return []
+    except Exception:
+        return []
+    if "x.ai" in str(getattr(agent, "base_url", "") or "").lower():
+        return []
+    return [json.loads(json.dumps(t)) for t in profile.hosted_tools]
+
+
+def without_shadowed_functions(tools: List[Any], hosted: List[dict]) -> List[Any]:
+    """``tools`` without a function tool named like one of ``hosted`` (e.g. the client ``web_search``)."""
+    names = {t.get("type") for t in hosted}
+    return [t for t in tools if not (_tool_name(t) in names and (not isinstance(t, dict) or t.get("type") == "function"))]
+
+
+def note_hosted_calls(agent: Any, response: Any) -> None:
+    """Count the provider-run searches in one Responses reply (``web_search_call`` output items) for the run report.
+    Only for a run that asked for hosted tools; never raises."""
+    requested = getattr(agent, "_tool_profile_requested", None)
+    if not isinstance(requested, ToolProfile) or not requested.hosted_tools:
+        return
+    try:
+        output = getattr(response, "output", None)
+        if output is None and isinstance(response, dict):
+            output = response.get("output")
+        n = 0
+        for item in output or []:
+            kind = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+            n += kind == "web_search_call"
+        if n:
+            counts = getattr(agent, "_tool_profile_hosted_calls", None) or {}
+            counts["web_search"] = counts.get("web_search", 0) + n
+            agent._tool_profile_hosted_calls = counts
+    except Exception:
+        logger.debug("hosted call count failed", exc_info=True)
 
 
 def _valid_entry(value: Any) -> bool:
@@ -120,6 +235,7 @@ def set_tool_profile(agent: Any, profile: Optional[ToolProfile]) -> None:
     agent._tool_profile_lifted = None
     agent._tool_profile_allowed = None
     agent._tool_profile_reads = None
+    agent._tool_profile_hosted_calls = None
 
 
 def active_tool_profile(agent: Any) -> Optional[ToolProfile]:
@@ -348,4 +464,8 @@ def tool_profile_report(agent: Any, api_calls: Any = None) -> Optional[dict]:
         reads = getattr(agent, "_tool_profile_reads", None)
         report["read_tools"] = reads if isinstance(reads, dict) else {
             "status": "none", "tools": 0, "chars": 0, "patterns": {p: 0 for p in requested.read_patterns}}
+    if requested.hosted_tools:
+        # {"web_search": provider-run searches across this run's requests} (billed per call by the provider)
+        hosted = getattr(agent, "_tool_profile_hosted_calls", None)
+        report["hosted_calls"] = dict(hosted) if isinstance(hosted, dict) else {}
     return report

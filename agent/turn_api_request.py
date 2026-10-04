@@ -130,6 +130,16 @@ def build_api_request(
     # extra_body, kwargs strings) — see sanitize_outbound_kwargs for the #50959 rationale.
     sanitize_outbound_kwargs(agent, api_kwargs)
     if agent.api_mode == "codex_responses":
+        # Iollo fork: the profile's provider-executed tools (web_search), last, after the projected function
+        # tools; only while the profile holds and only on the native OpenAI route (agent/tool_profile.py).
+        from agent.tool_profile import hosted_tools_for_request
+        _hosted = hosted_tools_for_request(agent)
+        if _hosted and api_kwargs.get("tools"):
+            # A client function of the same name collides with the built-in on this endpoint (see
+            # transports/codex.py::_alias_wire_tools), so it steps aside for this request; the session's tools,
+            # its pin and the other fallbacks (search_answer, web_extract) are unchanged.
+            from agent.tool_profile import without_shadowed_functions
+            api_kwargs["tools"] = [*without_shadowed_functions(api_kwargs["tools"], _hosted), *_hosted]
         api_kwargs = agent._get_transport().preflight_kwargs(
             api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
             sanitize_harmony_tokens=agent._is_codex_backend(),

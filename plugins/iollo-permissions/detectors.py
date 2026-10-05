@@ -80,34 +80,35 @@ class PageMemo:
 
 
 _LITERAL = re.compile(r"""(['"])((?:(?!\1).){1,80})\1""")
-_PRESS = re.compile(r"click|press|tap|submit|Enter|dispatch|keyboard|mouse", re.I)
+# The arguments of a press in browser_exec code: click_text("…"), click("…"), get_by_role("button", name="…"),
+# get_by_text("…"), locator("text=…"). Typed text (fill/type/press_key) never counts.
+_PRESS_CALL = re.compile(r"\b(click\w*|tap|get_by_role|get_by_text|get_by_label|locator)\s*\(", re.I)
 
 
-# Form submits only: requests (fetch/XHR) are the Iollo box's network rule's job, for owners with purchases on; a
-# static check on them blocked ordinary reads ("fetch('/api/orders')") for everyone (review 2, 2026-10-05).
-_SUBMIT_CODE = re.compile(r"\.submit\s*\(|requestSubmit", re.I)
-_NAVIGATE_CODE = re.compile(r"\.goto\s*\(|new_tab\s*\(|location(\.href)?\s*=", re.I)
-_CONFIRM_URL = re.compile(r"(checkout|payment|order|booking|reserv|pay)[^'\"]*/(confirm|complete|place|submit|process|"
-                          r"finali[sz]e|authori[sz]e)|[?&](confirm|complete|place_order)=", re.I)
-_COMMIT_WORDS = re.compile(r"\b(checkout|payment|pagamento|pago|pay|order|pedido|encomenda|purchase|kasse|bestell|"
-                           r"commande)\b", re.I)
+def _call_args(code: str, start: int) -> str:
+    depth, out = 1, []
+    for ch in code[start:start + 400]:
+        depth += (ch == "(") - (ch == ")")
+        if depth == 0:
+            break
+        out.append(ch)
+    return "".join(out)
 
 
 def pay_click_in_code(code: str, buttons: list) -> bool:
-    """browser_exec code that presses something and names a pay/place-order control in a string literal
-    (``click_text("Pay now")``), or submits a form / sends a request / navigates with checkout, order or payment words
-    in it (``document.forms[0].submit()`` on a checkout, ``fetch('/checkout/complete', ...)``). A static first line
-    only, easy to evade (string building, selectors, coordinates): the box's page gate and network rule are the
-    enforcement."""
-    if not code:
+    """browser_exec code that presses a control named by an unambiguous FINAL money phrase (``click_text("Pay
+    now")``, ``get_by_role("button", name="Place order")``), the same list as the Iollo box's narrow page gate
+    (permissions.yaml tier3.pay.final_buttons). Review 3 (2026-10-05): reserve/book/subscribe words, typed text,
+    form submits and navigations are NOT blocked here: rc13's behaviour (the judge, the owner's approval) stands
+    for them; the box's page gate is the enforcement."""
+    if not code or not buttons:
         return False
-    if _SUBMIT_CODE.search(code) and _COMMIT_WORDS.search(code):
-        return True
-    if _NAVIGATE_CODE.search(code) and _CONFIRM_URL.search(code):
-        return True
-    if not _PRESS.search(code):
-        return False
-    return any(any(b.search(m.group(2)) for b in buttons) for m in _LITERAL.finditer(code))
+    for call in _PRESS_CALL.finditer(code):
+        for literal in _LITERAL.finditer(_call_args(code, call.end())):
+            label = literal.group(2).removeprefix("text=")
+            if any(b.search(label) for b in buttons):
+                return True
+    return False
 
 
 def _strings(value: Any) -> Iterable[str]:
@@ -219,11 +220,13 @@ def detect(tool: str, args: Mapping[str, Any], settings: Settings, memo: PageMem
                 return "pay"
         else:
             label = " ".join([element or ""] + [str(args.get(k) or "") for k in ("text", "label", "name", "button")])
+            if tool.startswith("browser_") and any(b.search(label) for b in policy.final_buttons):
+                # The box's own browser never presses an unambiguous final money button through a generic click
+                # (Iollo, 2026-10-05; the same list as the box's narrow page gate).
+                return "pay_click"
             if any(b.search(label) for b in policy.pay_buttons) and memo.shows_amount(session) is not False:
-                # The box's own browser presses a final pay/order button only through commit_purchase (Iollo,
-                # 2026-10-05); a Mac computer_* click on one stays an ordinary payment approval.
-                return "pay_click" if tool.startswith("browser_") else "pay"
-    if tool == "browser_exec" and pay_click_in_code(str(args.get("code") or ""), policy.pay_buttons):
+                return "pay"       # rc13: the owner is asked (reserve, book, subscribe … and Mac clicks)
+    if tool == "browser_exec" and pay_click_in_code(str(args.get("code") or ""), policy.final_buttons):
         return "pay_click"
 
     # system

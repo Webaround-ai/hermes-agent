@@ -168,14 +168,15 @@ cloud docs record which image the boxes run.
 
 Owner decision: a purchase ends paid after one approval that names item, quantity, total and method. Fork side:
 
-- `plugins/iollo-permissions`: a box browser click on a pay/place-order control (`browser_click`/`browser_press` on
-  a control matching `tier3.pay.buttons` while the page shows an amount, or `browser_exec` code that presses
-  something and names such a control in a string literal, or that submits a form with checkout, order or payment
-  words / navigates to a confirm-like checkout URL, `detectors.pay_click_in_code`; requests are left to the box's
-  network rule) is BLOCKED in code, with a message that names no Iollo tool, before
-  and without the judge, with `PAY_CLICK_MESSAGE` ("nothing was paid … follow your purchase steps"; owners without Iollo's purchases flag have no commit tool). Card-field typing and
-  the Mac's `computer_*` clicks keep the ordinary tier-3 payment approval. `commit_purchase` is not an acting tool
-  here: the relay plugin raises its one approval (`tier3:pay: <item> ×<n> — <total> via <method>. Pay?`).
+- `plugins/iollo-permissions`: a box browser click (`browser_click`/`browser_press`) on a control matching
+  `tier3.pay.final_buttons` (the unambiguous final money phrases: pay now / pay <amount>, place order, buy now,
+  complete purchase or order … in seven languages; the same list as the Iollo box's narrow page gate), or
+  `browser_exec` code whose click/locator call names one (`detectors.pay_click_in_code`), is BLOCKED in code, before
+  and without the judge, with `PAY_CLICK_MESSAGE` ("nothing was paid … follow your purchase steps"). Review 3
+  (2026-10-05): everything else is rc13's behaviour: other `buttons` (reserve, book, subscribe …) on a page showing
+  money ask the owner, typed text, form submits and navigations go to the judge. Card-field typing and the Mac's
+  `computer_*` clicks keep the tier-3 payment approval. `commit_purchase` is not an acting tool here; the relay
+  raises its own approval. A policy file without `final_buttons` hard-blocks nothing.
 - `approvals.timeouts` (`tools/approval_context._get_approval_timeout_for`): `{rule-key prefix: seconds}`, matched
   with or without the `plugin_rule:` namespace, longest prefix wins; Iollo sets `iollo-tier3:pay:` to 600 s. The
   gateway wait (`approval_gateway_wait._poll_event`) uses the entry's pattern key; the human-wait ceiling covers the

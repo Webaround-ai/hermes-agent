@@ -45,6 +45,25 @@ tier3:
       - 'confirm.?(and|&).?pay'
       - '\bsubscribe\b'
       - 'check.?out'
+    # The unambiguous final money buttons (review 3, 2026-10-05): the fork hard-blocks a generic box click on them
+    # and the box's narrow (flag-off) page gate stops them; sandbox/pay_gate.js mirrors this list (a test compares).
+    # Everything else in `buttons` keeps rc13's behaviour: the owner is asked.
+    final_buttons:
+      - '^\s*(pay|pagar|payer|paga|bezahlen|betalen)(\s+(now|agora|ahora|maintenant|ora|jetzt|nu))?(\s*([€$£]|\d|eur\b|usd\b|gbp\b)[^a-z]*)?\s*$'
+      - '\bjetzt\s+(bezahlen|kaufen)\b'
+      - '\bplace\s+(your\s+)?order\b'
+      - '\bbuy\s+now\b'
+      - '\bcomplete\s+(your\s+)?(purchase|order)\b'
+      - '\bconfirm\s+(and|&)\s+pay\b'
+      - '\b(zahlungspflichtig|kostenpflichtig)\s+bestellen\b'
+      - '\bfinalizar\s+(a\s+)?(compra|encomenda|pedido)\b'
+      - '\bfazer\s+(o\s+|a\s+)?(pedido|encomenda)\b'
+      - '\bpasser\s+(la\s+)?commande\b'
+      - '\bconferma\s+(ordine|acquisto)\b'
+      - '\bbestelling\s+plaatsen\b'
+      - '\bcomprar\s+ahora\b'
+      - '\brealizar\s+(el\s+)?pedido\b'
+      - '\bacquista\s+ora\b'
     currency: '[€$£¥]\s?\d|\d[\d.,]*\s?(€|£|\$|eur|usd|gbp|chf|brl)\b'
   delete:
     describe: >-

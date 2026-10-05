@@ -213,9 +213,10 @@ def test_a_box_click_on_a_pay_control_is_blocked_with_guidance_whatever_the_judg
 @pytest.mark.parametrize("code", [
     'click_text("Place order")',
     "page.get_by_role('button', name='Pay now').click()",
-    'el = find("button", text="Pay €49.90"); el.click()',
-    'js("document.forms[0].submit()")  # on /checkout',
-    'page.goto("https://shop.example/checkout/confirm?token=abc")',
+    'click_text("Pay €49.90")',
+    'click_text("Complete order")',
+    'click_text("Zahlungspflichtig bestellen")',
+    'click_text("Fazer encomenda")',
 ])
 def test_browser_exec_code_that_presses_a_pay_control_is_blocked(plugin, box, code):
     stub = use_judge(plugin, StubJudge("APPROVE"))
@@ -230,6 +231,14 @@ def test_browser_exec_code_that_presses_a_pay_control_is_blocked(plugin, box, co
     'js("document.querySelector(\'#search\').form.submit()")',
     'new_tab("https://shop.example/checkout"); print(page_info())',
     "print(js(\"fetch('/api/orders').then(r => r.json())\"))",
+    # review 3 (2026-10-05): rc13 behaviour for everything but the final money phrases
+    'click_text("Reservar")', 'click_text("Reservar mesa")', 'click_text("Subscribe")',
+    'click_text("Finalizar registo")', 'click_text("Réserver une table")', 'click_text("Prenota un tavolo")',
+    'click_text("Bestellen")', 'click_text("Book now")', 'click_text("Pagar fatura")', 'click_text("Order history")',
+    'click_text("Track order")', 'print(page.text())  # Pay now', 'fill("#q","pagar")\npress("Enter")',
+    'click_text("Pay later options")', 'document.querySelector("form#newsletter").submit()  # order updates',
+    'click_text("Continue")', 'js("document.forms[0].submit()")  # on /checkout',
+    'page.goto("https://shop.example/checkout/confirm?token=abc")', 'type_text("Pay now")',
 ])
 def test_other_browser_exec_code_is_not_a_pay_click(plugin, box, code):
     use_judge(plugin, StubJudge("APPROVE"))
@@ -240,3 +249,13 @@ def test_commit_purchase_is_left_to_its_own_approval(plugin, box):
     """The relay raises commit_purchase's one payment card itself; this plugin adds no second one."""
     stub = use_judge(plugin, StubJudge("ESCALATE"))
     assert _call(plugin, "commit_purchase", {"item": "x", "total": "1"}) is None and stub.calls == 0
+
+
+def test_a_box_click_on_a_reserve_or_subscribe_button_keeps_rc13s_approval(plugin, box):
+    """Review 3: only the final money phrases are hard-blocked; "Reservar" on a page with a price asks the owner."""
+    use_judge(plugin, StubJudge("?"))
+    snapshot = json.dumps({"success": True, "data": {"snapshot": "\n".join([
+        '- text "Total: €42.50" [ref=e2]', '- button "Subscribe" [ref=e7]', '- button "Place order" [ref=e5]'])}})
+    plugin._on_post_tool_call(tool_name="browser_snapshot", args={}, result=snapshot, status="ok", session_id="s1")
+    assert _call(plugin, "browser_click", {"ref": "@e7"})["message"].startswith("tier3:pay:")      # asked, as rc13
+    assert _call(plugin, "browser_click", {"ref": "@e5"})["action"] == "block"                   # final: blocked

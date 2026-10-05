@@ -83,11 +83,27 @@ _LITERAL = re.compile(r"""(['"])((?:(?!\1).){1,80})\1""")
 _PRESS = re.compile(r"click|press|tap|submit|Enter|dispatch|keyboard|mouse", re.I)
 
 
+_SUBMIT_CODE = re.compile(r"\.submit\s*\(|requestSubmit|\bfetch\s*\(|XMLHttpRequest|sendBeacon|\.post\s*\(", re.I)
+_NAVIGATE_CODE = re.compile(r"\.goto\s*\(|new_tab\s*\(|location(\.href)?\s*=", re.I)
+_CONFIRM_URL = re.compile(r"(checkout|payment|order|booking|reserv|pay)[^'\"]*/(confirm|complete|place|submit|process|"
+                          r"finali[sz]e|authori[sz]e)|[?&](confirm|complete|place_order)=", re.I)
+_COMMIT_WORDS = re.compile(r"checkout|payment|pagamento|pago|/pay\b|order|pedido|encomenda|purchase|confirm|complete|"
+                           r"booking|reserv|subscri|kasse|bestell|commande", re.I)
+
+
 def pay_click_in_code(code: str, buttons: list) -> bool:
     """browser_exec code that presses something and names a pay/place-order control in a string literal
-    (``click_text("Pay now")``, ``page.get_by_role("button", name="Pagar")``). A static first line only: the box's
-    in-page payment gate stops the click whatever the code looks like (coordinates, Enter, element.click())."""
-    if not code or not _PRESS.search(code):
+    (``click_text("Pay now")``), or submits a form / sends a request / navigates with checkout, order or payment words
+    in it (``document.forms[0].submit()`` on a checkout, ``fetch('/checkout/complete', ...)``). A static first line
+    only, easy to evade (string building, selectors, coordinates): the box's page gate and network rule are the
+    enforcement."""
+    if not code:
+        return False
+    if _SUBMIT_CODE.search(code) and _COMMIT_WORDS.search(code):
+        return True
+    if _NAVIGATE_CODE.search(code) and _CONFIRM_URL.search(code):
+        return True
+    if not _PRESS.search(code):
         return False
     return any(any(b.search(m.group(2)) for b in buttons) for m in _LITERAL.finditer(code))
 

@@ -49,7 +49,7 @@ tier3:
     # and the box's narrow (flag-off) page gate stops them; sandbox/pay_gate.js mirrors this list (a test compares).
     # Everything else in `buttons` keeps rc13's behaviour: the owner is asked.
     final_buttons:
-      - '^\s*(pay|pagar|payer|paga|bezahlen|betalen)(\s+(now|agora|ahora|maintenant|ora|jetzt|nu))?(\s*([€$£]|\d|eur\b|usd\b|gbp\b)[^a-z]*)?\s*$'
+      - '^\s*(nu\s+|jetzt\s+)?(pay|pagar|payer|paga|bezahlen|betalen)(\s+(now|agora|ahora|maintenant|ora|jetzt|nu))?(\s*[·:–-]?\s*([€$£]|\d|eur\b|usd\b|gbp\b|chf\b|brl\b)[^a-z]*(eur|usd|gbp|chf|brl)?)?\s*$'
       - '\bjetzt\s+(bezahlen|kaufen)\b'
       - '\bplace\s+(your\s+)?order\b'
       - '\bbuy\s+now\b'

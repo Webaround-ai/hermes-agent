@@ -46,7 +46,11 @@ _DID = {
     "send_message": "Sent a message", "email_send": "Sent an email", "form_submit": "Submitted a form",
     "booking": "Made a booking", "calendar_invite": "Sent a calendar invite", "accept_terms": "Accepted terms",
     "files_trash": "Moved files to the Trash",
+    # Iollo 2026-10-05: the owner hears each time a site starts going through their home connection.
+    "browse_from_home": "Routed this task's shop through your home connection (your Mac)",
 }
+# Tier-1 notify tools that never need the judge: told to the owner after the fact, never asked.
+_NOTIFY_ONLY = frozenset({"browse_from_home"})
 _TIER3_SENTENCES = {
     "pay": "Iollo is about to pay or enter payment details.",
     "delete": "Iollo is about to delete or change many files outside its workspace.",
@@ -154,7 +158,7 @@ def _on_pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "
             logger.info("iollo-permissions: hard_block tool=%s", tool_name)
             return _block(message)
 
-    if not _is_acting(tool_name, settings):
+    if not _is_acting(tool_name, settings) or tool_name in _NOTIFY_ONLY:
         return None
 
     # 2./3. The judge, with the keyword detectors as label and fallback.

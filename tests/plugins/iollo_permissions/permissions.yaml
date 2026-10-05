@@ -12,7 +12,7 @@ write_roots: {box: [], mac: [Documents, Desktop, Downloads]}   # defaults, relat
 scratch_roots: {box: [/tmp, /root/work, $HERMES_HOME], mac: []}
 versioning: {enabled: true, keep_days: 30}
 delete: trash                                  # where a trash exists (workspace, write roots); scratch roots delete permanently
-tier1_notify: [send_message, email_send, form_submit, booking, calendar_invite, accept_terms]
+tier1_notify: [send_message, email_send, form_submit, booking, calendar_invite, accept_terms, browse_from_home]
 
 tier1:
   describe: >-

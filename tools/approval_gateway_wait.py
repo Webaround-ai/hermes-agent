@@ -42,7 +42,7 @@ class _ApprovalEntry:
         self.cancelled: str | None = None
 
 
-def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str) -> str:
+def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str, pattern_key: str = "") -> str:
     """Wait on *event* until it fires, the turn is interrupted, or approvals.timeout
     elapses; returns ``"set"`` | ``"interrupted"`` | ``"timeout"``. Polls in ~1s
     slices so activity heartbeats reach the agent's inactivity tracker every ~10s —
@@ -55,7 +55,8 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
     per-thread interrupt-cause channel (``get_interrupt_reason()``, a trusted fixed
     category), never inferred from message text, so the caller can report a
     withdrawn prompt without inventing a user refusal."""
-    deadline = time.monotonic() + max(_ctx._get_approval_timeout(), 0)
+    # Per rule (approvals.timeouts, e.g. Iollo's payment approvals), else approvals.timeout.
+    deadline = time.monotonic() + max(_ctx._get_approval_timeout_for(pattern_key), 0)
     heartbeat = activity_heartbeat("waiting for user approval")
     with human_wait_window(session_key):
         while True:
@@ -110,7 +111,8 @@ def _await_coalesced_leader(session_key: str, leader, payload: dict):
     _ctx._fire_approval_hook("pre_approval_request", **payload, coalesced=True)
     state = _poll_event(leader.event, session_key,
                         interrupt_log="Coalesced approval wait interrupted — "
-                                      "returning deny for session %s")
+                                      "returning deny for session %s",
+                        pattern_key=str(leader.data.get("pattern_key") or ""))
     cancelled = _cancel_cause(state, leader)
     if state == "interrupted":
         # Deny only OUR follower; the leader thread handles its own signal.
@@ -207,7 +209,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         return {"resolved": False, "choice": None, "notify_failed": True}
 
     state = _poll_event(entry.event, session_key,
-                        interrupt_log="Approval wait interrupted — returning deny for session %s")
+                        interrupt_log="Approval wait interrupted — returning deny for session %s",
+                        pattern_key=primary_key)
     cancelled = _cancel_cause(state, entry)
     if state == "interrupted":
         # Coalesced followers wake with the cause instead of a deny nobody issued.

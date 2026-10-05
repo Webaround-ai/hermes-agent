@@ -34,10 +34,10 @@ def test_approve_is_tier1_no_directive(plugin, box):
 def test_escalate_is_tier3_approve_directive(plugin, box):
     use_judge(plugin, StubJudge("ESCALATE"))
     _see_checkout(plugin)
-    result = _call(plugin, "browser_click", {"ref": "@e5"})
+    result = _call(plugin, "computer_click", {"ref": "@e5"})      # the Mac: still an ordinary payment approval
     assert result["action"] == "approve"
     assert result["message"].startswith("tier3:pay: ")
-    assert result["rule_key"].startswith("iollo-tier3:pay:browser_click:")
+    assert result["rule_key"].startswith("iollo-tier3:pay:computer_click:")
 
 
 def test_escalate_without_a_detector_is_labelled_other(plugin, box):
@@ -67,7 +67,7 @@ def test_an_escalated_browser_click_without_a_detector_is_tier1(plugin, box, ref
 def test_an_escalated_pay_control_or_card_field_still_asks(plugin, box):
     use_judge(plugin, StubJudge("ESCALATE"))
     _see_checkout(plugin)
-    assert _call(plugin, "browser_click", {"ref": "@e5"})["message"].startswith("tier3:pay: ")
+    assert _call(plugin, "computer_click", {"ref": "@e5"})["message"].startswith("tier3:pay: ")
     assert _call(plugin, "browser_type", {"ref": "@e3", "text": FAKE_CARD})["message"].startswith("tier3:pay: ")
     use_judge(plugin, StubJudge("DENY"))
     assert _call(plugin, "browser_click", {"ref": "@e1"})["action"] == "block"
@@ -126,7 +126,7 @@ def test_fallback_card_number_is_tier3_and_plain_send_is_tier1(plugin, box, capl
 def test_fallback_detectors(plugin, box):
     use_judge(plugin, StubJudge("?"))
     _see_checkout(plugin)
-    assert _call(plugin, "browser_click", {"ref": "@e5"})["message"].startswith("tier3:pay:")
+    assert _call(plugin, "computer_click", {"ref": "@e5"})["message"].startswith("tier3:pay:")
     assert _call(plugin, "browser_click", {"ref": "@e1"}) is None
     assert _call(plugin, "browser_type", {"ref": "@e4", "text": "hunter2"})["message"].startswith("tier3:system:")
     assert _call(plugin, "browser_vault_save_login", {"site": "example.com"})["message"].startswith("tier3:system:")
@@ -193,6 +193,45 @@ def test_acceptance_checkout_click_asks_once_email_send_asks_none(plugin, box, m
 
     use_judge(plugin, judge)
     _see_checkout(plugin)
-    assert hp.resolve_pre_tool_block("browser_click", {"ref": "@e5"}) is None
+    assert hp.resolve_pre_tool_block("computer_click", {"ref": "@e5"}) is None
     assert hp.resolve_pre_tool_block("email_send", {"to": "ana@example.com", "body": "Friday?"}) is None
-    assert len(asked) == 1 and asked[0][0] == "browser_click" and asked[0][1].startswith("tier3:pay: ")
+    assert len(asked) == 1 and asked[0][0] == "computer_click" and asked[0][1].startswith("tier3:pay: ")
+
+
+# ---- the box's final pay/order click goes through commit_purchase only (Iollo, 2026-10-05) ---------------------------
+
+@pytest.mark.parametrize("judge", ["APPROVE", "ESCALATE", "garbage", "down"])
+def test_a_box_click_on_a_pay_control_is_blocked_with_guidance_whatever_the_judge(plugin, box, judge):
+    """Deterministic and before the judge: no Jev call, no approval card that would then press it."""
+    stub = use_judge(plugin, StubJudge(RuntimeError("gateway down")) if judge == "down" else StubJudge(judge))
+    _see_checkout(plugin)
+    result = _call(plugin, "browser_click", {"ref": "@e5"})
+    assert result["action"] == "block" and "commit_purchase" in result["message"]
+    assert "nothing was paid" in result["message"] and stub.calls == 0
+
+
+@pytest.mark.parametrize("code", [
+    'click_text("Place order")',
+    "page.get_by_role('button', name='Pay now').click()",
+    'el = find("button", text="Pay €49.90"); el.click()',
+])
+def test_browser_exec_code_that_presses_a_pay_control_is_blocked(plugin, box, code):
+    stub = use_judge(plugin, StubJudge("APPROVE"))
+    result = _call(plugin, "browser_exec", {"code": code})
+    assert result["action"] == "block" and "commit_purchase" in result["message"] and stub.calls == 0
+
+
+@pytest.mark.parametrize("code", [
+    'click_text("Add to basket")',
+    'print(page_info())  # the "Pay now" button is visible',
+    'new_tab("https://shop.example/checkout"); print(page_info())',
+])
+def test_other_browser_exec_code_is_not_a_pay_click(plugin, box, code):
+    use_judge(plugin, StubJudge("APPROVE"))
+    assert _call(plugin, "browser_exec", {"code": code}) is None
+
+
+def test_commit_purchase_is_left_to_its_own_approval(plugin, box):
+    """The relay raises commit_purchase's one payment card itself; this plugin adds no second one."""
+    stub = use_judge(plugin, StubJudge("ESCALATE"))
+    assert _call(plugin, "commit_purchase", {"item": "x", "total": "1"}) is None and stub.calls == 0

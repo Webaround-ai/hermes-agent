@@ -79,6 +79,19 @@ class PageMemo:
             return self._amount.get(session)
 
 
+_LITERAL = re.compile(r"""(['"])((?:(?!\1).){1,80})\1""")
+_PRESS = re.compile(r"click|press|tap|submit|Enter|dispatch|keyboard|mouse", re.I)
+
+
+def pay_click_in_code(code: str, buttons: list) -> bool:
+    """browser_exec code that presses something and names a pay/place-order control in a string literal
+    (``click_text("Pay now")``, ``page.get_by_role("button", name="Pagar")``). A static first line only: the box's
+    in-page payment gate stops the click whatever the code looks like (coordinates, Enter, element.click())."""
+    if not code or not _PRESS.search(code):
+        return False
+    return any(any(b.search(m.group(2)) for b in buttons) for m in _LITERAL.finditer(code))
+
+
 def _strings(value: Any) -> Iterable[str]:
     if isinstance(value, str):
         yield value
@@ -189,7 +202,11 @@ def detect(tool: str, args: Mapping[str, Any], settings: Settings, memo: PageMem
         else:
             label = " ".join([element or ""] + [str(args.get(k) or "") for k in ("text", "label", "name", "button")])
             if any(b.search(label) for b in policy.pay_buttons) and memo.shows_amount(session) is not False:
-                return "pay"
+                # The box's own browser presses a final pay/order button only through commit_purchase (Iollo,
+                # 2026-10-05); a Mac computer_* click on one stays an ordinary payment approval.
+                return "pay_click" if tool.startswith("browser_") else "pay"
+    if tool == "browser_exec" and pay_click_in_code(str(args.get("code") or ""), policy.pay_buttons):
+        return "pay_click"
 
     # system
     if tool in policy.system_tools:

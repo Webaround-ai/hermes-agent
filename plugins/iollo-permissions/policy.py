@@ -52,6 +52,10 @@ class Policy:
     bulk_window_minutes: int
     tier4_commands: List[CommandRule]
     scratch_roots: List[str] = field(default_factory=list)
+    # Iollo 2026-10-05: the unambiguous final money buttons (pay now, place order, buy now …) that the box's browser
+    # never presses through a generic click; empty (an older policy file) means none are hard-blocked.
+    final_buttons: List[re.Pattern] = field(default_factory=list)
+
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -172,6 +176,7 @@ def parse_policy(data: Any) -> Policy:
         pay_buttons=_compile_all(pay.get("buttons"), "tier3.pay.buttons"),
         pay_currency=_one(pay.get("currency"), r"[€$£¥]\s?\d|\d[\d.,]*\s?(€|£|\$|eur|usd|gbp|chf|brl)\b",
                           "tier3.pay.currency"),
+        final_buttons=_compile_all(pay.get("final_buttons"), "tier3.pay.final_buttons"),
         bulk_threshold=_int(delete.get("bulk_threshold"), 20, "tier3.delete.bulk_threshold"),
         system_commands=_compile_all(system.get("commands"), "tier3.system.commands"),
         system_paths=_str_list(system.get("paths"), "tier3.system.paths"),

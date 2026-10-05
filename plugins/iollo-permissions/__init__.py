@@ -46,13 +46,20 @@ _DID = {
     "send_message": "Sent a message", "email_send": "Sent an email", "form_submit": "Submitted a form",
     "booking": "Made a booking", "calendar_invite": "Sent a calendar invite", "accept_terms": "Accepted terms",
     "files_trash": "Moved files to the Trash",
+    # Iollo 2026-10-05: the owner hears each time a site starts going through their home connection.
+    "browse_from_home": "Routed this task's shop through your home connection (your Mac)",
 }
+# Tier-1 notify tools that never need the judge: told to the owner after the fact, never asked.
+_NOTIFY_ONLY = frozenset({"browse_from_home"})
 _TIER3_SENTENCES = {
     "pay": "Iollo is about to pay or enter payment details.",
     "delete": "Iollo is about to delete or change many files outside its workspace.",
     "system": "Iollo is about to change a system or security setting, or a saved password or key.",
     "bulk_new": "Iollo is about to message several people, including someone new.",
 }
+
+PAY_CLICK_MESSAGE = ("Stopped before pressing a final pay or order button; nothing was paid. That button is never "
+                     "pressed with this tool: follow your purchase steps for it.")
 
 _state_lock = threading.Lock()
 _settings_cache: Dict[str, Any] = {"key": None, "value": None}
@@ -150,7 +157,7 @@ def _on_pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "
             logger.info("iollo-permissions: hard_block tool=%s", tool_name)
             return _block(message)
 
-    if not _is_acting(tool_name, settings):
+    if not _is_acting(tool_name, settings) or tool_name in _NOTIFY_ONLY:
         return None
 
     # 2./3. The judge, with the keyword detectors as label and fallback.
@@ -160,6 +167,11 @@ def _on_pre_tool_call(tool_name: str = "", args: Any = None, session_id: str = "
     except Exception:
         logger.exception("iollo-permissions: detector failed")
         detector = None
+    if detector == "pay_click":
+        # Deterministic, before and without the judge: the final pay/order button of a purchase is pressed only by
+        # the relay's commit_purchase, which asks the owner with the item, quantity, total and method.
+        logger.info("iollo-permissions: pay_click_blocked tool=%s", tool_name)
+        return _block(PAY_CLICK_MESSAGE)
     extra: Dict[str, Any] = {}
     if "ref" in args:
         element = _memo.element(session, args.get("ref"))

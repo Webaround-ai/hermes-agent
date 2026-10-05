@@ -79,6 +79,38 @@ class PageMemo:
             return self._amount.get(session)
 
 
+_LITERAL = re.compile(r"""(['"])((?:(?!\1).){1,80})\1""")
+# The arguments of a press in browser_exec code: click_text("…"), click("…"), get_by_role("button", name="…"),
+# get_by_text("…"), locator("text=…"). Typed text (fill/type/press_key) never counts.
+_PRESS_CALL = re.compile(r"\b(click\w*|tap|get_by_role|get_by_text|get_by_label|locator)\s*\(", re.I)
+
+
+def _call_args(code: str, start: int) -> str:
+    depth, out = 1, []
+    for ch in code[start:start + 400]:
+        depth += (ch == "(") - (ch == ")")
+        if depth == 0:
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def pay_click_in_code(code: str, buttons: list) -> bool:
+    """browser_exec code that presses a control named by an unambiguous FINAL money phrase (``click_text("Pay
+    now")``, ``get_by_role("button", name="Place order")``), the same list as the Iollo box's narrow page gate
+    (permissions.yaml tier3.pay.final_buttons). Review 3 (2026-10-05): reserve/book/subscribe words, typed text,
+    form submits and navigations are NOT blocked here: rc13's behaviour (the judge, the owner's approval) stands
+    for them; the box's page gate is the enforcement."""
+    if not code or not buttons:
+        return False
+    for call in _PRESS_CALL.finditer(code):
+        for literal in _LITERAL.finditer(_call_args(code, call.end())):
+            label = literal.group(2).removeprefix("text=")
+            if any(b.search(label) for b in buttons):
+                return True
+    return False
+
+
 def _strings(value: Any) -> Iterable[str]:
     if isinstance(value, str):
         yield value
@@ -188,8 +220,14 @@ def detect(tool: str, args: Mapping[str, Any], settings: Settings, memo: PageMem
                 return "pay"
         else:
             label = " ".join([element or ""] + [str(args.get(k) or "") for k in ("text", "label", "name", "button")])
+            if tool.startswith("browser_") and any(b.search(label) for b in policy.final_buttons):
+                # The box's own browser never presses an unambiguous final money button through a generic click
+                # (Iollo, 2026-10-05; the same list as the box's narrow page gate).
+                return "pay_click"
             if any(b.search(label) for b in policy.pay_buttons) and memo.shows_amount(session) is not False:
-                return "pay"
+                return "pay"       # rc13: the owner is asked (reserve, book, subscribe … and Mac clicks)
+    if tool == "browser_exec" and pay_click_in_code(str(args.get("code") or ""), policy.final_buttons):
+        return "pay_click"
 
     # system
     if tool in policy.system_tools:

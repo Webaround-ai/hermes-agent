@@ -141,3 +141,16 @@ def test_bundled_plugin_is_off_by_default_and_loads_when_enabled(tmp_path, monke
     assert directive == "block" and message.startswith("Stopped before erasing")
     from tools.registry import registry
     assert registry.get_entry("files_trash") is not None
+
+
+def test_browse_from_home_is_told_after_the_fact_never_judged(plugin, box):
+    """Iollo 2026-10-05: each time a shop starts going through the owner's home connection they hear it ("did"
+    line); it is never an approval and needs no judge call."""
+    from tests.plugins.iollo_permissions.conftest import StubJudge, use_judge
+    stub = use_judge(plugin, StubJudge("ESCALATE"))
+    assert plugin._on_pre_tool_call(tool_name="browse_from_home", args={"site": "shop.example"}, session_id="s1") is None
+    assert stub.calls == 0
+    plugin._on_post_tool_call(tool_name="browse_from_home", args={"site": "shop.example"}, result="{}", status="ok",
+                              session_id="s1")
+    entry = json.loads(box.activity.read_text().splitlines()[-1])
+    assert entry["did"].startswith("Routed this task's shop through your home connection")

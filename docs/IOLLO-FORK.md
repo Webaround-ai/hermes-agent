@@ -164,6 +164,30 @@ cloud docs record which image the boxes run.
   `tests/agent/test_iollo_tool_profile_and_ended_turn.py`. Known unrelated
   failure on the base: `TestCodexToolProgressBridge::test_session_wired_with_on_event_that_fires_tool_progress`.
 
+## Payment gate and approval windows (2026-10-05, branch `claude/payment-gate`)
+
+Owner decision: a purchase ends paid after one approval that names item, quantity, total and method. Fork side:
+
+- `plugins/iollo-permissions`: a box browser click (`browser_click`/`browser_press`) on a control matching
+  `tier3.pay.final_buttons` (the unambiguous final money phrases: pay now / pay <amount>, place order, buy now,
+  complete purchase or order … in seven languages; the same list as the Iollo box's narrow page gate), or
+  `browser_exec` code whose click/locator call names one (`detectors.pay_click_in_code`), is BLOCKED in code, before
+  and without the judge, with `PAY_CLICK_MESSAGE` ("nothing was paid … follow your purchase steps"). Review 3
+  (2026-10-05): everything else is rc13's behaviour: other `buttons` (reserve, book, subscribe …) on a page showing
+  money ask the owner, typed text, form submits and navigations go to the judge. Card-field typing and the Mac's
+  `computer_*` clicks keep the tier-3 payment approval. `commit_purchase` is not an acting tool here; the relay
+  raises its own approval. A policy file without `final_buttons` hard-blocks nothing.
+- `approvals.timeouts` (`tools/approval_context._get_approval_timeout_for`): `{rule-key prefix: seconds}`, matched
+  with or without the `plugin_rule:` namespace, longest prefix wins; Iollo sets `iollo-tier3:pay:` to 600 s. The
+  gateway wait (`approval_gateway_wait._poll_event`) uses the entry's pattern key; the human-wait ceiling covers the
+  longest window. Unanswered is still refused (fail closed). Every other approval keeps `approvals.timeout`.
+- The static code check is a first line only (string building, selectors and coordinates evade it). The enforcement
+  that does not depend on the model's tool choice is in the Iollo repo: `sandbox/pay_gate.js`, an
+  isolated-world page script the box proxy adds to every page, stops any click, Enter or submit on such a control
+  unless `commit_purchase` armed it after Approve.
+
+Tests: `tests/plugins/iollo_permissions/test_judge.py` (pay_click cases), `tests/tools/test_approval_rule_timeouts.py`.
+
 ## Taking an upstream release
 
 Use an isolated clean worktree and record the old base before a deliberate upstream upgrade.

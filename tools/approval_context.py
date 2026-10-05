@@ -253,6 +253,47 @@ def _get_approval_mode() -> str:
     return _normalize_approval_mode(_get_approval_config().get("mode", "manual"))
 
 
+def _clamp_timeout(raw) -> int | None:
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        return None
+    try:
+        from agent.deadline import MAX_SAFE_TIMEOUT_S
+        safe_cap = int(MAX_SAFE_TIMEOUT_S)
+    except Exception:
+        safe_cap = 365 * 24 * 3600
+    return max(min(value, safe_cap), 0)
+
+
+def _rule_timeouts() -> dict:
+    """``approvals.timeouts``: ``{rule-key prefix: seconds}`` (Iollo, 2026-10-05: a purchase approval waits longer
+    than other tiers). A prefix matches the approval's pattern key with or without its ``plugin_rule:`` namespace."""
+    raw = _get_approval_config().get("timeouts")
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for prefix, seconds in raw.items():
+        value = _clamp_timeout(seconds)
+        if isinstance(prefix, str) and prefix and value is not None:
+            out[prefix] = value
+    return out
+
+
+def _get_approval_timeout_for(pattern_key: str = "") -> int:
+    """The wait for one approval: the longest ``approvals.timeouts`` prefix of its pattern key, else
+    ``approvals.timeout``."""
+    key = str(pattern_key or "")
+    bare = key.removeprefix("plugin_rule:")
+    matches = [(len(p), v) for p, v in _rule_timeouts().items() if key.startswith(p) or bare.startswith(p)]
+    return max(matches)[1] if matches else _get_approval_timeout()
+
+
+def _get_max_approval_timeout() -> int:
+    """The longest any approval may wait (the human-wait ceiling must cover every per-rule window)."""
+    return max([_get_approval_timeout(), *_rule_timeouts().values()])
+
+
 def _get_approval_timeout() -> int:
     """Read ``approvals.timeout`` (default 300s: gateway push notifications may
     not be seen for minutes; 60s failed closed before Telegram taps landed).

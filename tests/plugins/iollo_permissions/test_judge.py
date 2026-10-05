@@ -206,7 +206,7 @@ def test_a_box_click_on_a_pay_control_is_blocked_with_guidance_whatever_the_judg
     stub = use_judge(plugin, StubJudge(RuntimeError("gateway down")) if judge == "down" else StubJudge(judge))
     _see_checkout(plugin)
     result = _call(plugin, "browser_click", {"ref": "@e5"})
-    assert result["action"] == "block" and "commit_purchase" in result["message"]
+    assert result["action"] == "block" and "purchase steps" in result["message"]
     assert "nothing was paid" in result["message"] and stub.calls == 0
 
 
@@ -215,13 +215,12 @@ def test_a_box_click_on_a_pay_control_is_blocked_with_guidance_whatever_the_judg
     "page.get_by_role('button', name='Pay now').click()",
     'el = find("button", text="Pay €49.90"); el.click()',
     'js("document.forms[0].submit()")  # on /checkout',
-    "js(\"fetch('/checkout/complete', {method: 'POST'})\")",
     'page.goto("https://shop.example/checkout/confirm?token=abc")',
 ])
 def test_browser_exec_code_that_presses_a_pay_control_is_blocked(plugin, box, code):
     stub = use_judge(plugin, StubJudge("APPROVE"))
     result = _call(plugin, "browser_exec", {"code": code})
-    assert result["action"] == "block" and "commit_purchase" in result["message"] and stub.calls == 0
+    assert result["action"] == "block" and "nothing was paid" in result["message"] and stub.calls == 0
 
 
 @pytest.mark.parametrize("code", [
@@ -230,6 +229,7 @@ def test_browser_exec_code_that_presses_a_pay_control_is_blocked(plugin, box, co
     'print(page_info())',
     'js("document.querySelector(\'#search\').form.submit()")',
     'new_tab("https://shop.example/checkout"); print(page_info())',
+    "print(js(\"fetch('/api/orders').then(r => r.json())\"))",
 ])
 def test_other_browser_exec_code_is_not_a_pay_click(plugin, box, code):
     use_judge(plugin, StubJudge("APPROVE"))

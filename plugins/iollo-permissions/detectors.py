@@ -83,12 +83,14 @@ _LITERAL = re.compile(r"""(['"])((?:(?!\1).){1,80})\1""")
 _PRESS = re.compile(r"click|press|tap|submit|Enter|dispatch|keyboard|mouse", re.I)
 
 
-_SUBMIT_CODE = re.compile(r"\.submit\s*\(|requestSubmit|\bfetch\s*\(|XMLHttpRequest|sendBeacon|\.post\s*\(", re.I)
+# Form submits only: requests (fetch/XHR) are the Iollo box's network rule's job, for owners with purchases on; a
+# static check on them blocked ordinary reads ("fetch('/api/orders')") for everyone (review 2, 2026-10-05).
+_SUBMIT_CODE = re.compile(r"\.submit\s*\(|requestSubmit", re.I)
 _NAVIGATE_CODE = re.compile(r"\.goto\s*\(|new_tab\s*\(|location(\.href)?\s*=", re.I)
 _CONFIRM_URL = re.compile(r"(checkout|payment|order|booking|reserv|pay)[^'\"]*/(confirm|complete|place|submit|process|"
                           r"finali[sz]e|authori[sz]e)|[?&](confirm|complete|place_order)=", re.I)
-_COMMIT_WORDS = re.compile(r"checkout|payment|pagamento|pago|/pay\b|order|pedido|encomenda|purchase|confirm|complete|"
-                           r"booking|reserv|subscri|kasse|bestell|commande", re.I)
+_COMMIT_WORDS = re.compile(r"\b(checkout|payment|pagamento|pago|pay|order|pedido|encomenda|purchase|kasse|bestell|"
+                           r"commande)\b", re.I)
 
 
 def pay_click_in_code(code: str, buttons: list) -> bool:

@@ -58,9 +58,8 @@ _TIER3_SENTENCES = {
     "bulk_new": "Iollo is about to message several people, including someone new.",
 }
 
-PAY_CLICK_MESSAGE = ("Stopped before pressing a pay or place-order button; nothing was paid. The final step of a "
-                     "purchase is commit_purchase (item, quantity, total, currency, method, button): it asks the "
-                     "owner once with those details and presses the button on Approve.")
+PAY_CLICK_MESSAGE = ("Stopped before pressing a final pay or order button; nothing was paid. That button is never "
+                     "pressed with this tool: follow your purchase steps for it.")
 
 _state_lock = threading.Lock()
 _settings_cache: Dict[str, Any] = {"key": None, "value": None}

@@ -170,10 +170,10 @@ Owner decision: a purchase ends paid after one approval that names item, quantit
 
 - `plugins/iollo-permissions`: a box browser click on a pay/place-order control (`browser_click`/`browser_press` on
   a control matching `tier3.pay.buttons` while the page shows an amount, or `browser_exec` code that presses
-  something and names such a control in a string literal, or that submits a form / sends a request with checkout,
-  order or payment words / navigates to a confirm-like checkout URL, `detectors.pay_click_in_code`) is BLOCKED in
-  code, before
-  and without the judge, with `PAY_CLICK_MESSAGE` pointing at the relay's `commit_purchase`. Card-field typing and
+  something and names such a control in a string literal, or that submits a form with checkout, order or payment
+  words / navigates to a confirm-like checkout URL, `detectors.pay_click_in_code`; requests are left to the box's
+  network rule) is BLOCKED in code, with a message that names no Iollo tool, before
+  and without the judge, with `PAY_CLICK_MESSAGE` ("nothing was paid … follow your purchase steps"; owners without Iollo's purchases flag have no commit tool). Card-field typing and
   the Mac's `computer_*` clicks keep the ordinary tier-3 payment approval. `commit_purchase` is not an acting tool
   here: the relay plugin raises its one approval (`tier3:pay: <item> ×<n> — <total> via <method>. Pay?`).
 - `approvals.timeouts` (`tools/approval_context._get_approval_timeout_for`): `{rule-key prefix: seconds}`, matched

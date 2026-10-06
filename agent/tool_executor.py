@@ -400,6 +400,9 @@ def _unwrap_tool_search_call(
     probe (``flatten_probe`` collapses the probe's JSON payload to one plain string for
     callers that wrap the message in ``{"error": ...}``).
     """
+    from agent.managed_tools import denial
+    if blocked := denial(_canonical_tool_name(function_name)):
+        return function_name, function_args, blocked
     scope_block: Optional[str] = None
     try:
         from tools import tool_search as _ts

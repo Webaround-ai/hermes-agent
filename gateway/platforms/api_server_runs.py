@@ -191,8 +191,25 @@ def _initialize_run_state(self, *, store_factory) -> None:
     ) = ({} for _ in range(7))
 
 
+async def _handle_live_runs(self, request):
+    """Profile-scoped live work, including runs whose creation acknowledgement was lost.
+
+    Management uses this to quiesce a profile before deleting its files. Never
+    expose another profile's IDs or a transcript/input in this operational view.
+    """
+    if auth_error := self._check_auth(request):
+        return auth_error
+    ids = {key for key, task in self._active_run_tasks.items() if not task.done()}
+    ids.update(self._active_run_agents)
+    return web.json_response({"data": [{"id": key, "status": "running"} for key in sorted(ids)
+        if _request_owns_run(self, request, key)]})
+
+
 def _http_routes(self) -> list[tuple[str, str, Any]]:
+    async def live_runs(request):
+        return await _handle_live_runs(self, request)
     return [
+        ("GET", "/v1/runs", live_runs),
         ("POST", "/v1/runs", self._handle_runs), ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),

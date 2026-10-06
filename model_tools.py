@@ -337,6 +337,10 @@ def _select_tool_names(enabled_toolsets: Optional[List[str]], disabled_toolsets:
     # disabled toolset are strictly stripped out. See issue #17309.
     if disabled_toolsets:
         _apply_toolset_selection(tools, disabled_toolsets, quiet_mode, disable=True)
+    from agent.managed_tools import allowed_tools
+    ceiling = allowed_tools()
+    if ceiling is not None:
+        tools.intersection_update(ceiling)
     return tools
 
 
@@ -890,6 +894,9 @@ def handle_function_call(
         function_args = {}
     trace = list(tool_request_middleware_trace or [])
     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
+    from agent.managed_tools import denial
+    if blocked := denial(function_name):
+        return tool_error(blocked)
     ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id)
     start = time.monotonic()
 

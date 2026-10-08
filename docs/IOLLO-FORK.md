@@ -433,3 +433,11 @@ app). Cloud's sandbox image adds its integration layer on the selected base; exi
 base builds may publish directly to this registry without a full GitHub release. Pin the exact
 fork revision and registry digest in the build evidence. GHCR publication is an additional
 artifact of the full release workflow, not a required marker of cloud fleet convergence.
+
+### rc15: explicit final reply publication (2026-10-08)
+
+Built on rc14, this release lets a trusted successful turn-ending callback return final reply text.
+The runtime appends and persists a closing assistant message after tool results before streaming it,
+without another model call. Failed, mixed, interrupted and ambiguous publication rounds keep running.
+The control plane opts in per run; full stored prompts and tool pins remain intact. Cloud coordinates
+plugin, guide and prompt rollout. Focused runtime/relay checks passed remotely (43); no local suite ran.

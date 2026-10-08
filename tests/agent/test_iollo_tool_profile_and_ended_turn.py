@@ -484,3 +484,28 @@ def test_ascii_recovery_never_rewrites_the_canonical_tool_schemas():
     kwargs = {"tools": projected, "messages": []}
     sanitize_outbound_kwargs(agent, kwargs)
     assert agent.tools[0]["function"]["description"] == canonical
+
+
+def test_explicit_publication_text_closes_without_another_model_call(monkeypatch):
+    monkeypatch.setattr(registry.get_entry(END_IF), 'ends_turn', lambda args, result: args['reply_text'])
+    agent = _agent(END_IF)
+    result = _run(agent, [_response('', [_call(END_IF, 'c1', '{"reply_text":"Here is the explanation."}')])], {END_IF: OK})
+    assert agent.client.chat.completions.create.call_count == 1
+    assert result['final_response'] == 'Here is the explanation.'
+    assert result['messages'][-1]['role'] == 'assistant'
+    assert result['messages'][-1]['content'] == result['final_response']
+    row = next(m for m in result['messages'] if m.get('tool_calls'))
+    assert not row.get('content')  # the persisted call row is not rewritten
+
+
+@pytest.mark.parametrize('failure,mixed', [(True, False), (False, True)])
+def test_publication_text_does_not_hide_failed_or_mixed_rounds(monkeypatch, failure, mixed):
+    monkeypatch.setattr(registry.get_entry(END_IF), 'ends_turn', lambda args, result: args['reply_text'])
+    agent = _agent(END_IF, PLAIN)
+    calls = [_call(END_IF, 'c1', '{"reply_text":"Premature success"}')]
+    if mixed:
+        calls.append(_call(PLAIN, 'c2'))
+    result = _run(agent, [_response('', calls), _response('Recovered.')],
+                  {END_IF: BAD if failure else OK, PLAIN: OK})
+    assert agent.client.chat.completions.create.call_count == 2
+    assert result['final_response'] == 'Recovered.'

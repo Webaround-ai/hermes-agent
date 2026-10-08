@@ -441,3 +441,16 @@ The runtime appends and persists a closing assistant message after tool results 
 without another model call. Failed, mixed, interrupted and ambiguous publication rounds keep running.
 The control plane opts in per run; full stored prompts and tool pins remain intact. Cloud coordinates
 plugin, guide and prompt rollout. Focused runtime/relay checks passed remotely (43); no local suite ran.
+## Managed shared profiles (2026-10-06, dedicated shared runtime deployed)
+
+`agent.managed_allowed_tools` is an optional operator tool ceiling, enforced in
+schema selection and before inline/registry dispatch. Absence preserves personal
+agents; an empty/malformed value denies all. On dedicated shared hosts, the root
+profile sets `agent.managed_tool_host: true`, so missing per-profile policy also
+denies tools. These files must be operator-owned. This is application policy,
+not an OS sandbox or a protection against arbitrary host code execution.
+
+`GET /p/<profile>/v1/runs` returns only that authenticated scope's live run IDs,
+including runs whose creation acknowledgement was lost. The shared runtime uses
+it to quiesce a profile before removing its storage. No input/output is returned.
+Cloud's `docs/SHARED-AGENTS.md` owns deployment and group-membership semantics.

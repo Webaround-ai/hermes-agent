@@ -161,3 +161,40 @@ async def test_profile_middleware_binds_auth_before_handler(
         assert (await accepted.json())["profile"] == "worker"
 
 
+
+
+@pytest.mark.asyncio
+async def test_live_runs_never_expose_another_profile_or_finished_task(adapter, tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+    from gateway.platforms.api_server_runs import _handle_live_runs
+    from gateway.platforms.api_server import _api_request_profile
+    key = 'a' * 32
+    for name in ('alpha', 'beta'):
+        home = tmp_path / name
+        home.mkdir()
+        (home / '.env').write_text('API_SERVER_KEY=' + key + '\n')
+    monkeypatch.setattr('hermes_cli.profiles.get_profile_dir', lambda name: tmp_path / name)
+    ss.set_multiplex_active(True)
+    loop = asyncio.get_running_loop()
+    live = loop.create_future()
+    finished = loop.create_future(); finished.set_result(None)
+    adapter._active_run_tasks.update({'run-alpha': live, 'run-beta': live, 'run-finished': finished})
+    request = SimpleNamespace(headers={'Authorization': 'Bearer ' + key}, remote='127.0.0.1',
+                              transport=None, method='GET', path_qs='/v1/runs')
+    for name in ('alpha', 'beta'):
+        token = _api_request_profile.set(name)
+        try:
+            with adapter._profile_scope(name):
+                adapter._run_owners['run-' + name] = adapter._run_idempotency_scope(request)
+        finally:
+            _api_request_profile.reset(token)
+    token = _api_request_profile.set('alpha')
+    try:
+        with adapter._profile_scope('alpha'):
+            response = await _handle_live_runs(adapter, request)
+            assert json.loads(response.text)['data'] == [{'id': 'run-alpha', 'status': 'running'}]
+    finally:
+        _api_request_profile.reset(token)
+        live.cancel()

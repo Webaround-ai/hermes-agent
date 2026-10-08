@@ -187,10 +187,26 @@ def run_tool_round(
     # text, ends the turn with that text instead of one more model call (``tool_ended_turn``).
     ended_text = tool_ended_turn_text(agent, assistant_message, messages)
     if ended_text:
+        if getattr(agent, "_tool_ended_turn_payload", False):
+            # The reply came from the successful tool's explicit publication payload. Append a
+            # closing assistant row; never rewrite the already-persisted tool-call row.
+            append_message(messages, {"role": "assistant", "content": ended_text})
+            try:
+                persisted = agent._flush_messages_to_session_db(messages, conversation_history)
+            except Exception as exc:
+                from hermes_state import classify_persistence_error
+                agent._last_persistence_error_cause = classify_persistence_error(exc)
+                persisted = False
+                logger.warning("Final publication persistence failed: %s", type(exc).__name__)
+            if persisted is False:
+                _turn_exit_reason = "session_persistence_failed"
+                final_response, failed = "", True
+                return _verdict("break")
         _turn_exit_reason = "tool_ended_turn"
         final_response = ended_text
         agent._turn_ended_by_tool = True
-        if getattr(agent, "_tool_ended_turn_commentary", None) == ended_text:
+        if (getattr(agent, "_tool_ended_turn_commentary", None) == ended_text
+                or getattr(agent, "_tool_ended_turn_payload", False)):
             # Promoted Responses commentary only went out as interim commentary: stream it once as reply text,
             # like a Claude reply's own deltas (the run's output carries it either way).
             with suppress(Exception):
@@ -248,9 +264,10 @@ def tool_ended_turn_text(agent: Any, assistant_message: Any, messages: Any) -> O
     """The visible text that ends the turn after this round, or ``None`` to continue as usual.
 
     Every call must name a tool registered ``ends_turn`` (``True``, or a ``predicate(args, result)`` that
-    returns True), have a recorded result that is not a failure (``agent.display._detect_tool_failure``),
+    returns True or explicit final reply text), have a recorded result that is not a failure (``agent.display._detect_tool_failure``),
     and the assistant message must carry visible text. Any doubt continues the loop: a failed or refused
     call reaches the model, which can fix it."""
+    agent._tool_ended_turn_payload = False
     # Opt-in per run (``ends_turn: true`` on /v1/runs): skills and flows that write records after the reply's cards
     # (task_update after show_widget) must keep their next round on every other run.
     if getattr(agent, "_ends_turn_enabled", False) is not True:
@@ -263,11 +280,9 @@ def tool_ended_turn_text(agent: Any, assistant_message: Any, messages: Any) -> O
         return None
     from agent.conversation_loop import _STALE_MARKER_RE
     raw = assistant_message.content if isinstance(getattr(assistant_message, "content", None), str) else ""
-    if not raw or _STALE_MARKER_RE.fullmatch(raw.strip()) or not agent._has_content_after_think_block(raw):
-        return None
-    text = agent._strip_think_blocks(raw).strip()
-    if not text:
-        return None
+    text = (agent._strip_think_blocks(raw).strip() if raw and
+            not _STALE_MARKER_RE.fullmatch(raw.strip()) and agent._has_content_after_think_block(raw) else "")
+    published = []
     from agent.display import _detect_tool_failure
     from tools.registry import registry
     ids = {coalesce_tool_call_id(tc) for tc in calls}
@@ -294,12 +309,26 @@ def tool_ended_turn_text(agent: Any, assistant_message: Any, messages: Any) -> O
                 except ValueError:
                     return None
             try:
-                if not rule(args if isinstance(args, dict) else {}, result):
+                decision = rule(args if isinstance(args, dict) else {}, result)
+                if isinstance(decision, str):
+                    if not decision.strip() or len(decision) > 8000:
+                        return None
+                    published.append(decision)
+                elif decision is not True:
                     return None
             except Exception:  # noqa: BLE001 - a broken predicate never ends a turn
                 logger.debug("ends_turn predicate for %s raised", name, exc_info=True)
                 return None
-    return text
+    if published:
+        # Multiple distinct final answers are ambiguous; let the model reconcile them.
+        if len(set(published)) != 1:
+            return None
+        raw = published[0]
+        if _STALE_MARKER_RE.fullmatch(raw.strip()) or not agent._has_content_after_think_block(raw):
+            return None
+        text = agent._strip_think_blocks(raw).strip()
+        agent._tool_ended_turn_payload = bool(text)
+    return text or None
 
 
 def _all_turn_ending(calls: Any) -> bool:

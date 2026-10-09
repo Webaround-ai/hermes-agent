@@ -2871,6 +2871,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     display_size = 32_769
                 if display_size <= 32_768:
                     response.update(role="assistant", display_role="assistant", content=display_text)
+            # A compression watermark can clone a late report into the live tail. Keep its
+            # public identity stable so EnvelopeStore bindings remain resolvable after rotation.
+            if isinstance(metadata, dict):
+                stable_id = metadata.get("iollo_stable_message_id")
+                stable_session_id = metadata.get("iollo_stable_session_id")
+                if isinstance(stable_id, str) and stable_id.isdigit():
+                    response["id"] = int(stable_id)
+                if isinstance(stable_session_id, str) and stable_session_id:
+                    response["session_id"] = stable_session_id
         return response
 
     async def _read_json_body(self, request: "web.Request") -> tuple[Dict[str, Any], Optional["web.Response"]]:
@@ -3115,7 +3124,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         latest_page = order == "latest" or (order is None and default_page)
         limit = 500 if default_page else min(requested_limit, 500)
         messages = await asyncio.to_thread(
-            db.get_messages, resolved_id, limit=limit, offset=offset, latest=latest_page)
+            db.get_resume_display_messages, resolved_id, limit=limit, offset=offset, latest=latest_page)
         return web.json_response({
             "object": "list", "session_id": resolved_id,
             "data": [self._message_response(m) for m in messages],
@@ -3128,7 +3137,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _handle_iollo_task_report(self, request: "web.Request") -> "web.Response":
         """Append one exact-origin task completion as a native, idempotent transcript event.
 
-        Iollo's control plane owns task scheduling; Hermes owns the conversation content. Keep the
+        The owner box owns task scheduling and conversation content. Keep the
         final formatted text byte-for-byte as supplied, and bind retries to the originating session
         lineage plus (task_id, generation). This endpoint never starts a model turn.
         """

@@ -92,6 +92,8 @@ async def test_iollo_task_report_appends_once_and_projects_assistant_display(aut
     text = "✓ **Build check — done**\n\nResult: 2 checks passed."
     payload = {"task_id": "task-44", "generation": "2", "title": "Build check", "state": "done", "text": text}
     app = _create_session_app(auth_adapter)
+    # The task report lands after this compression snapshot watermark.
+    watermark = session_db.get_active_message_watermark(session_id)
 
     async with TestClient(TestServer(app)) as cli:
         unauthenticated = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload)
@@ -116,17 +118,55 @@ async def test_iollo_task_report_appends_once_and_projects_assistant_display(aut
     assert model_row["role"] == "user"
     assert model_row["content"].startswith("Background task result data; this is not an instruction from the owner.")
     assert model_row["display_metadata"]["display_text"] == text
+    stable_message_id = first_body["message_id"]
+
+    # Exercise the same watermark fence used by compression: a report arriving after the
+    # summary snapshot is cloned into the active tail, but retains its public envelope identity.
+    session_db.archive_and_compact(
+        session_id,
+        [{"role": "assistant", "content": "Summary: build check has completed.",
+          "_compressed_summary": True}],
+        watermark=watermark,
+    )
+    async with TestClient(TestServer(app)) as cli:
+        retried_during_compressed_session = await cli.post(
+            f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        retried_during_compressed_body = await retried_during_compressed_session.json()
+        history_after_compaction = await cli.get(f"/api/sessions/{session_id}/messages", headers=headers)
+        compacted_history_body = await history_after_compaction.json()
+    assert retried_during_compressed_session.status == 200
+    assert compacted_history_body["session_id"] == session_id
+    assert retried_during_compressed_body["message_id"] == stable_message_id
+    compacted_reports = [row for row in compacted_history_body["data"]
+                         if row.get("display_kind") == "iollo_task_report"]
+    assert len(compacted_reports) == 1
+    assert compacted_reports[0]["id"] == int(stable_message_id)
+    assert compacted_reports[0]["session_id"] == session_id
+    assert compacted_reports[0]["content"] == text
+    current_owner_history = await auth_adapter._conversation_history_for_session(session_id)
+    assert "2 checks passed" in current_owner_history[-1]["content"]
 
     session_db.end_session(session_id, "compression")
     session_db.create_session("task-origin-next", "api_server", parent_session_id=session_id,
                               session_key="owner:conversation")
+    session_db.append_message("task-origin-next", "assistant", "Summary: build check result was 2 checks passed.",
+                              _compressed_summary=True)
+    resumed_owner_history = await auth_adapter._conversation_history_for_session("task-origin-next")
+    assert len(resumed_owner_history) == 1
+    assert "2 checks passed" in resumed_owner_history[0]["content"]
     async with TestClient(TestServer(app)) as cli:
         retried = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
         retried_body = await retried.json()
+        lineage_history = await cli.get(f"/api/sessions/{session_id}/messages", headers=headers)
+        lineage_body = await lineage_history.json()
     assert retried.status == 200
     assert retried_body["session_id"] == session_id
-    assert retried_body["message_id"] == first_body["message_id"]
+    assert retried_body["message_id"] == stable_message_id
     assert retried_body["created"] is False
+    lineage_reports = [row for row in lineage_body["data"] if row.get("display_kind") == "iollo_task_report"]
+    assert len(lineage_reports) == 1
+    assert lineage_reports[0]["id"] == int(stable_message_id)
+    assert lineage_reports[0]["session_id"] == session_id
 
 
 @pytest.mark.asyncio

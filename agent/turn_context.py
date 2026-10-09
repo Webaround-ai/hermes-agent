@@ -852,6 +852,30 @@ def _memory_query_text(original_user_message: Any) -> str:
     return ""
 
 
+def _log_turn_setup(agent: Any, setup_started: float) -> None:
+    """Iollo fork: one INFO line per turn with where the time before the first model call went (counts and
+    milliseconds only, never content). retrieve/rerank/refresh/hits come from a memory provider that
+    exposes ``last_prefetch_timing`` (plugins/memory/iollo_notes); zeros when none does or none ran."""
+    timing: Dict[str, Any] = {}
+    with suppress(Exception):
+        manager = getattr(agent, "_memory_manager", None)
+        for provider in (manager.providers if manager is not None else []):
+            found = getattr(provider, "last_prefetch_timing", None)
+            if isinstance(found, dict) and found:
+                timing = found
+                break
+
+    def _n(key: str) -> int:
+        value = timing.get(key, 0)
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+    logger.info(
+        "turn setup: retrieve_ms=%d rerank_ms=%d refresh_ms=%d hits=%d pre_llm_ms=%d",
+        _n("retrieve_ms"), _n("rerank_ms"), _n("refresh_ms"), _n("hits"),
+        int(round((time.monotonic() - setup_started) * 1000)),
+    )
+
+
 def _memory_turn_start_and_prefetch(
     agent: Any, original_user_message: Any, turn_author: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -997,6 +1021,7 @@ def build_turn_context(
     compression."""
     from agent.turn_context_compaction import run_turn_start_compaction
 
+    setup_started = time.monotonic()
     # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
     install_safe_stdio()
 
@@ -1152,6 +1177,7 @@ def build_turn_context(
             )
 
     _persist_turn_start(agent, messages, conversation_history, pending_cli_message)
+    _log_turn_setup(agent, setup_started)
 
     return TurnContext(
         user_message=user_message, original_user_message=original_user_message, messages=messages,

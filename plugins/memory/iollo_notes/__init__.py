@@ -4,7 +4,8 @@ Many small typed Markdown notes in ``$HERMES_HOME/memory-notes`` (the synced git
 generated profile ``USER.md`` injected whole into the system prompt, and everything else found
 on demand by a local index (``index.py``). Memory never leaves the device: the only network call
 is the Jev decision URL the policy configures (``decide_url``), and every decision has a local
-fallback. Consolidation and USER.md generation run on the box (iollo brief 032), not here.
+fallback. Recall before each turn searches locally and lets Jev rerank only within RERANK_TIMEOUT_S
+(``prefetch``). Consolidation and USER.md generation run on the box (iollo brief 032), not here.
 
 Activate with ``memory.provider: iollo_notes``. Settings live under ``memory.iollo_notes`` in
 config.yaml: ``decide_url``, ``decide_token_env``, ``decide_timeout_s`` (1.5), ``device``
@@ -19,6 +20,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -44,6 +46,8 @@ ROUTE_CANDIDATES = 50
 ROUTE_MIN_SCORE = 0.9
 STATE_CHARS = 4000
 DEFAULT_TIMEOUT_S = 1.5
+# The rerank sits on the turn path before the first model call: Jev gets half a second, then the local order goes.
+RERANK_TIMEOUT_S = 0.5
 NO_PROFILE_LINE = "USER PROFILE: no profile yet."
 _PROFILE_SEP = "═" * 46
 _AUTO = object()
@@ -109,6 +113,10 @@ def _load_plugin_config() -> dict:
         return {}
 
 
+def _ms(seconds: float) -> int:
+    return int(round(seconds * 1000))
+
+
 def _today() -> str:
     return _dt.date.today().isoformat()
 
@@ -116,21 +124,6 @@ def _today() -> str:
 # -- Jev answers ---------------------------------------------------------------------------------
 # The decide route returns {"answers": ... | null}; null (or no answer at all) means "use the
 # fallback". The answer shapes below are read leniently; anything else counts as no answer.
-
-def _as_yes_no(answer: Any) -> Optional[bool]:
-    if isinstance(answer, bool):
-        return answer
-    if isinstance(answer, str):
-        low = answer.strip().lower()
-        return True if low in ("yes", "y", "true") else False if low in ("no", "n", "false") else None
-    if isinstance(answer, dict):
-        for key in ("answer", "retrieve", "value"):
-            if key in answer:
-                return _as_yes_no(answer[key])
-    if isinstance(answer, list) and len(answer) == 1:
-        return _as_yes_no(answer[0])
-    return None
-
 
 def _as_scores(answer: Any, ids: List[str]) -> Optional[Dict[str, float]]:
     def num(v):
@@ -169,6 +162,8 @@ class IolloNotesProvider(MemoryProvider):
         self._session_id = ""
         self._write_lock = threading.Lock()
         self._last_recall = 0
+        # The last prefetch's timings (turn setup log line, agent/turn_context.py): counts only, never content.
+        self.last_prefetch_timing: Dict[str, int] = {}
 
     @property
     def name(self) -> str:
@@ -231,6 +226,9 @@ class IolloNotesProvider(MemoryProvider):
         except Exception as exc:
             logger.warning("iollo_notes index refresh failed at start: %s", type(exc).__name__)
 
+    def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        self.last_prefetch_timing = {}  # a turn without prefetch (trivial prompt) logs zeros, not the last turn's
+
     def on_session_switch(self, new_session_id: str, **kwargs) -> None:
         self._session_id = new_session_id or self._session_id
 
@@ -271,15 +269,18 @@ class IolloNotesProvider(MemoryProvider):
 
     # -- Jev -------------------------------------------------------------------------------------
 
-    def _decide(self, decision: str, state: str, candidates: List[Dict[str, Any]]) -> Any:
-        """The decide route's ``answers``; None when unconfigured, down, slow or undecided."""
+    def _decide(self, decision: str, state: str, candidates: List[Dict[str, Any]],
+                timeout: Optional[float] = None) -> Any:
+        """The decide route's ``answers``; None when unconfigured, down, slow or undecided. ``timeout``
+        caps the wait below the configured ``decide_timeout_s`` (the turn-path rerank)."""
         url = str(self._config.get("decide_url") or "").strip()
         if not url:
             return None
         try:
-            timeout = float(self._config.get("decide_timeout_s") or DEFAULT_TIMEOUT_S)
+            configured = float(self._config.get("decide_timeout_s") or DEFAULT_TIMEOUT_S)
         except (TypeError, ValueError):
-            timeout = DEFAULT_TIMEOUT_S
+            configured = DEFAULT_TIMEOUT_S
+        timeout = configured if timeout is None else min(timeout, configured)
         headers = {"Content-Type": "application/json"}
         token_env = str(self._config.get("decide_token_env") or "").strip()
         token = os.environ.get(token_env, "") if token_env else ""
@@ -304,21 +305,36 @@ class IolloNotesProvider(MemoryProvider):
     # -- recall ----------------------------------------------------------------------------------
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Recall for this turn, before the first model call: local order, Jev refines when fast.
+
+        The local index answers first (FTS + vectors, milliseconds). Only when it has hits does Jev rerank
+        them, capped at RERANK_TIMEOUT_S; a slower or missing answer leaves the local order, which is the
+        order the model gets. There is no "retrieve?" round trip: an empty local search already costs
+        nothing, and a pointless hit list is three short lines (2026-10-09: the two sequential decide calls
+        held every turn up to ~3 s before its first model call)."""
         self._last_recall = 0
+        self.last_prefetch_timing = {"retrieve_ms": 0, "rerank_ms": 0, "refresh_ms": 0, "hits": 0}
         if self._index is None or is_trivial_prompt(query):
             return ""
-        if _as_yes_no(self._decide("retrieve", query, [])) is False:
-            return ""
+        timing = self.last_prefetch_timing
         try:
+            started = time.monotonic()
             self._idx.refresh()
+            searched = time.monotonic()
             hits = self._idx.search(query, limit=RERANK_CANDIDATES)
+            timing["refresh_ms"] = _ms(searched - started)
+            timing["retrieve_ms"] = _ms(time.monotonic() - searched)
         except Exception as exc:
             logger.warning("iollo_notes prefetch search failed: %s", type(exc).__name__)
             return ""
+        timing["hits"] = len(hits)
         if not hits:
             return ""
         ids = [h["id"] for h in hits]
-        scores = _as_scores(self._decide("rerank", query, [self._candidate(h) for h in hits]), ids)
+        started = time.monotonic()
+        answer = self._decide("rerank", query, [self._candidate(h) for h in hits], timeout=RERANK_TIMEOUT_S)
+        timing["rerank_ms"] = _ms(time.monotonic() - started)
+        scores = _as_scores(answer, ids)
         if scores:
             order = {note_id: i for i, note_id in enumerate(ids)}
             hits = sorted(hits, key=lambda h: (-scores.get(h["id"], float("-inf")), order[h["id"]]))

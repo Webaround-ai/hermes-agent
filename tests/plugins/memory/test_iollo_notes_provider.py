@@ -1,5 +1,5 @@
 """iollo_notes provider (fork brief 003) against a stub Jev decide server: the profile block,
-retrieve/rerank in prefetch, fallbacks when Jev is down or slow, memory_note routing and writes,
+local search then a capped rerank in prefetch, fallbacks when Jev is down or slow, memory_note routing and writes,
 and the default (provider unset) staying untouched."""
 
 import json
@@ -104,29 +104,31 @@ def test_trivial_prompt_skips_everything(home, stub):
     provider.shutdown()
 
 
-def test_retrieve_no_gives_no_context(home, stub):
-    stub.answers["retrieve"] = "no"
+def test_no_local_hits_means_no_jev_call(home, stub):
+    """Local search first: nothing found locally, nothing asked (there is no "retrieve?" round trip)."""
     provider = make(home, stub.url, decide_token_env="IOLLO_TEST_DECIDE_TOKEN")
-    assert provider.prefetch("what did I say about Ana?") == ""
-    assert stub.decisions() == ["retrieve"]
+    assert provider.prefetch("quantum chromodynamics lattice gauge") == ""
+    assert stub.requests == []
     assert provider.recall_status() is None
+    assert provider.last_prefetch_timing["hits"] == 0 and provider.last_prefetch_timing["rerank_ms"] == 0
     provider.shutdown()
 
 
-def test_retrieve_yes_reranks_and_keeps_top_three(home, stub, monkeypatch):
+def test_local_hits_rerank_once_and_keep_top_three(home, stub, monkeypatch):
     monkeypatch.setenv("IOLLO_TEST_DECIDE_TOKEN", "fake-token")
-    stub.answers["retrieve"] = "yes"
     wanted = {"preferences/coffee": 0.9, "people/bruno-lima": 0.8, "people/ana-costa": 0.1}
     stub.answers["rerank"] = lambda body: [wanted.get(c["id"], 0.0) for c in body["candidates"]]
     provider = make(home, stub.url, decide_token_env="IOLLO_TEST_DECIDE_TOKEN", embedder=ConceptEmbedder())
     context = provider.prefetch("what did I say about Ana, Bruno and coffee?")
     assert ids_in(context) == ["preferences/coffee", "people/bruno-lima", "people/ana-costa"]
-    assert stub.decisions() == ["retrieve", "rerank"]
-    rerank = stub.requests[1]
+    assert stub.decisions() == ["rerank"]
+    rerank = stub.requests[0]
     assert rerank["auth"] == "Bearer fake-token"
     assert 3 <= len(rerank["body"]["candidates"]) <= 10
     assert set(rerank["body"]["candidates"][0]) == {"id", "type", "title", "bullets"}
     assert provider.recall_status().count == 3
+    timing = provider.last_prefetch_timing
+    assert set(timing) == {"retrieve_ms", "rerank_ms", "refresh_ms", "hits"} and timing["hits"] >= 3
     fenced = build_memory_context_block(context)
     assert fenced.startswith("<memory-context>") and "people/ana-costa" in fenced
     provider.shutdown()
@@ -139,15 +141,22 @@ def test_decide_down_uses_fused_order(home):
     provider.shutdown()
 
 
-def test_decide_slow_falls_back_within_the_timeout(home):
+def test_slow_rerank_keeps_the_local_order_within_half_a_second(home):
+    """The configured decide timeout (1.5 s, still used by memory_note routing) does not apply on the turn
+    path: the rerank gets 0.5 s, then the local order is the order."""
     slow = DecideStub(delay=2.0)
-    slow.answers["retrieve"] = "no"
+    slow.answers["rerank"] = lambda body: [1.0 if c["id"] == "people/ana-costa" else 0.0 for c in body["candidates"]]
     try:
-        provider = make(home, slow.url, timeout=0.2)
+        local = make(home)
+        expected = ids_in(local.prefetch("what did I say about Ana?"))
+        local.shutdown()
+        provider = make(home, slow.url, timeout=1.5)
         started = time.monotonic()
         context = provider.prefetch("what did I say about Ana?")
-        assert time.monotonic() - started < 1.5
-        assert ids_in(context)[0] == "people/ana-costa"
+        assert time.monotonic() - started < 1.0
+        assert ids_in(context) == expected
+        assert slow.decisions() == ["rerank"]
+        assert 400 <= provider.last_prefetch_timing["rerank_ms"] < 1000
         provider.shutdown()
     finally:
         slow.close()

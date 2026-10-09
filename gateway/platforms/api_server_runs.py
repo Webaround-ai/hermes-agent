@@ -24,6 +24,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from agent.prompt_version import normalize_prompt_version, set_prompt_version
+from agent.turn_notes import split_turn_notes
 from agent.tool_profile import (
     normalize_ends_turn, normalize_skip_background_review, normalize_tool_profile, set_ends_turn, set_tool_profile,
     tool_profile_report)
@@ -518,6 +519,7 @@ class _RunLaunch:
     tool_profile: Any = None  # iollo fork: this run's tool profile (agent/tool_profile.py), None = every tool
     ends_turn: bool = False  # iollo fork: turn-ending tools may end this run's turn (agent/turn_tool_round.py)
     skip_background_review: bool = False  # iollo fork: no post-turn memory/skill review for this run only
+    turn_notes: str = ""  # iollo fork: this turn's notes from ``instructions``, sent on the user message (agent/turn_notes.py)
 
     @property
     def approval_session_key(self) -> str:
@@ -756,6 +758,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
                 self._run_statuses, self._run_owners)
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
         self._run_idempotency_ids.add(run_id)
+    # Iollo fork: the system prompt stays byte-stable across turns; this turn's notes go on its message.
+    instructions, turn_notes = split_turn_notes(instructions)
     launch = _RunLaunch(
         self, run_id, q, session_id, gateway_session_key, _declared_selected, user_message,
         conversation_history, session_history_delivery,
@@ -767,7 +771,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
         turn_author=turn_author, prompt_version=prompt_version, tool_profile=tool_profile,
-        ends_turn=ends_turn, skip_background_review=skip_background_review)
+        ends_turn=ends_turn, skip_background_review=skip_background_review, turn_notes=turn_notes)
     self._activate_admitted_request()
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -1011,6 +1015,8 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         set_prompt_version(agent, run.prompt_version)
         set_tool_profile(agent, run.tool_profile)
         set_ends_turn(agent, run.ends_turn)
+        if run.turn_notes:
+            agent._gateway_turn_context_notes = run.turn_notes  # one-shot, consumed by the turn prologue
         if run.skip_background_review:
             # Only ever switched on: an agent built with the flag (cron) keeps it.
             agent.skip_background_review = True

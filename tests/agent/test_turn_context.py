@@ -263,6 +263,27 @@ def test_prefetch_runs_for_substantive_user_message():
     assert ctx.ext_prefetch_cache == "REMEMBERED CONTEXT"
 
 
+def test_turn_setup_line_carries_provider_timings_and_no_content(caplog):
+    """Iollo fork: one INFO line per turn says where the time before the first model call went."""
+    agent, mm = _agent_with_memory_manager()
+    mm.providers = [types.SimpleNamespace(name="builtin"), types.SimpleNamespace(
+        name="iollo_notes", last_prefetch_timing={"retrieve_ms": 7, "rerank_ms": 412, "refresh_ms": 3, "hits": 4})]
+    with caplog.at_level("INFO", logger="agent.turn_context"):
+        _build(agent, user_message="what did we decide about the deploy pipeline?")
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("turn setup:")]
+    assert len(lines) == 1
+    assert lines[0].startswith("turn setup: retrieve_ms=7 rerank_ms=412 refresh_ms=3 hits=4 pre_llm_ms=")
+    assert "deploy" not in lines[0]
+
+
+def test_turn_setup_line_logs_zeros_without_a_timing_provider(caplog):
+    agent = _FakeAgent()
+    with caplog.at_level("INFO", logger="agent.turn_context"):
+        _build(agent)
+    assert any(r.getMessage().startswith("turn setup: retrieve_ms=0 rerank_ms=0 refresh_ms=0 hits=0 pre_llm_ms=")
+               for r in caplog.records)
+
+
 # ── Per-turn author ──────────────────────────────────────────────────────────
 
 

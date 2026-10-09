@@ -408,6 +408,146 @@ def test_project_tools_returns_the_same_list_when_nothing_is_removed():
     assert project_tools(agent, tools) is tools
 
 
+def test_explicit_profile_materializes_scoped_deferred_tool_and_dispatches_directly(monkeypatch):
+    """A Jev-style profile can name a deferred plugin without adding discovery bridges."""
+    import model_tools
+    from tools.tool_search import BRIDGE_TOOL_NAMES, ToolSearchConfig, assemble_tool_defs
+
+    name = "iollo_profile_search_answer"
+    hidden = "iollo_profile_hidden_answer"
+    toolset = "mcp-iollo-profile-test"
+    calls = []
+    schema = {"name": name, "description": "Read the owner's scoped profile.",
+              "parameters": {"type": "object", "properties": {
+                  "query": {"type": "string"}}, "required": ["query"]}}
+    hidden_schema = {"name": hidden, "description": "Out of scope.",
+                     "parameters": {"type": "object", "properties": {}}}
+    registry.register(name=name, toolset=toolset, schema=schema,
+                      handler=lambda args: calls.append(args["query"]) or json.dumps({"answer": "found"}))
+    registry.register(name=hidden, toolset="mcp-iollo-other-test", schema=hidden_schema,
+                      handler=lambda args: "should not dispatch")
+    try:
+        raw = model_tools.get_tool_definitions(
+            enabled_toolsets=[toolset], quiet_mode=True, skip_tool_search_assembly=True)
+        assert [item["function"]["name"] for item in raw] == [name]
+        assembled = assemble_tool_defs(
+            raw, context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "on", "listing": "off"}),
+        )
+        assert assembled.activated
+        assert BRIDGE_TOOL_NAMES <= {item["function"]["name"] for item in assembled.tool_defs}
+        assert name not in {item["function"]["name"] for item in assembled.tool_defs}
+
+        agent = SimpleNamespace(
+            tools=assembled.tool_defs,
+            valid_tool_names={item["function"]["name"] for item in assembled.tool_defs},
+            enabled_toolsets=[toolset], disabled_toolsets=None,
+        )
+        stored_pin = list(agent.tools)
+        set_tool_profile(agent, ToolProfile("jev-lookup", frozenset({name})))
+        projected = project_tools(agent, agent.tools)
+        assert [item["function"]["name"] for item in projected] == [name]
+        assert agent.tools == stored_pin
+        assert name in agent.valid_tool_names
+        assert hidden not in agent.valid_tool_names
+
+        result = model_tools.handle_function_call(
+            name, {"query": "remembered detail"}, enabled_tools=list(agent.valid_tool_names),
+            enabled_toolsets=agent.enabled_toolsets, disabled_toolsets=agent.disabled_toolsets,
+        )
+        assert json.loads(result) == {"answer": "found"}
+        assert calls == ["remembered detail"]
+
+        # A later unprofiled request restores the normal assembled pin and does
+        # not keep the request-local direct-dispatch grant.
+        agent._tool_profile = None
+        project_tools(agent, agent.tools)
+        assert name not in agent.valid_tool_names
+        assert agent.tools == stored_pin
+    finally:
+        registry.deregister(name)
+        registry.deregister(hidden)
+
+
+@pytest.mark.parametrize("read_cap, expected_reads, status", [
+    (12, {LIST, GET}, "ok"),
+    (1, set(), "over_budget"),
+])
+def test_deferred_read_profile_keeps_annotations_write_exclusions_and_budget(
+    _mcp, monkeypatch, read_cap, expected_reads, status,
+):
+    import tools.mcp_tool as core
+    from tools.mcp_tool_scope import _resolve_server_key
+    from tools.tool_search import ToolSearchConfig, assemble_tool_defs
+
+    toolset = "mcp-linear"
+    registered = (LIST, GET, CREATE, LYING)
+    schema = lambda name: {"name": name, "description": name,
+                           "parameters": {"type": "object", "properties": {}}}
+    for name in registered:
+        registry.register(name=name, toolset=toolset, schema=schema(name), handler=lambda args: "{}")
+    try:
+        server_key = _resolve_server_key("linear")
+        for name in registered:
+            monkeypatch.setitem(core._mcp_tool_server_names, name, "linear")
+        monkeypatch.setitem(core._tool_read_only_hints, server_key,
+                            {"list_issues": True, "get_issue": True, "create_issue": False,
+                             "updateIssue": True})
+        import model_tools
+        raw = model_tools.get_tool_definitions(
+            enabled_toolsets=[toolset, "iollo_test"], quiet_mode=True, skip_tool_search_assembly=True)
+        assembled = assemble_tool_defs(
+            raw, context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "on", "listing": "off"}),
+        )
+        assert assembled.activated
+        agent = SimpleNamespace(
+            tools=assembled.tool_defs,
+            valid_tool_names={item["function"]["name"] for item in assembled.tool_defs},
+            enabled_toolsets=[toolset, "iollo_test"], disabled_toolsets=None,
+        )
+        if read_cap != 12:
+            monkeypatch.setattr("agent.tool_profile.MAX_READ_TOOLS", read_cap)
+        set_tool_profile(agent, ToolProfile(
+            "light", frozenset({PLAIN}), read_patterns=("mcp__linear__*",)))
+        projected = project_tools(agent, agent.tools)
+        names = {item["function"]["name"] for item in projected}
+        assert PLAIN in names and ESCAPE in names
+        assert names & {LIST, GET, CREATE, LYING} == expected_reads
+        assert CREATE not in names and LYING not in names
+        assert agent._tool_profile_reads["status"] == status
+    finally:
+        for name in registered:
+            registry.deregister(name)
+
+
+def test_deferred_profile_catalog_failure_is_a_visible_request_error(monkeypatch):
+    agent = SimpleNamespace(
+        tools=_defs("tool_search"), valid_tool_names={"tool_search"},
+        enabled_toolsets=["mcp-missing-catalog"], disabled_toolsets=None,
+    )
+    set_tool_profile(agent, ToolProfile("lookup", frozenset({"mcp_missing_lookup"})))
+    monkeypatch.setattr("model_tools.get_tool_definitions", lambda **kwargs: (_ for _ in ()).throw(OSError("catalog down")))
+    with pytest.raises(RuntimeError, match="Unable to resolve this run's scoped tool profile"):
+        project_tools(agent, agent.tools)
+
+
+def test_profile_catalog_keeps_oneshot_and_side_agent_drops(monkeypatch):
+    import model_tools
+
+    agent = SimpleNamespace(
+        tools=_defs("tool_search"), valid_tool_names={"tool_search"}, side_agent=True,
+        enabled_toolsets=["test-scope"], disabled_toolsets=None,
+    )
+    set_tool_profile(agent, ToolProfile("limited", frozenset({"skill_manage", "manage_connections"})))
+    monkeypatch.setattr("agent.oneshot_footprint.is_single_query_session", lambda: True)
+    monkeypatch.setattr(model_tools, "get_tool_definitions",
+                        lambda **kwargs: _defs("skill_manage", "manage_connections"))
+
+    assert project_tools(agent, agent.tools) == []
+    assert agent.valid_tool_names == {"tool_search"}
+
+
 def test_lift_ignores_unknown_names_and_profile_tools():
     agent = SimpleNamespace(_tool_profile=ToolProfile("light", frozenset({PLAIN})), valid_tool_names={PLAIN, OTHER})
     assert lift_tool_profile_for_calls(agent, [_call(PLAIN, "c"), _call("nope", "d")]) is False

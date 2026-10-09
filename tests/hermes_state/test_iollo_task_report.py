@@ -68,7 +68,8 @@ def test_resume_display_history_pages_compression_lineage_and_keeps_report_ident
     assert reports[0]["id"] == stable_id
     assert reports[0]["session_id"] == "origin"
     assert reports[0]["display_metadata"]["display_text"] == text
-    assert db.get_resume_display_messages("continuation", limit=1, latest=True)[0]["content"].startswith("Summary:")
+    latest = db.get_resume_display_messages("continuation", limit=1, latest=True)[0]
+    assert latest["display_kind"] == "iollo_task_report"
     # The next owner turn reads the active compressed tip, whose seeded summary carries the result.
     model_history = db.get_messages_as_conversation("continuation")
     assert len(model_history) == 1

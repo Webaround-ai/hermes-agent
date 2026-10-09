@@ -193,6 +193,66 @@ async def test_iollo_task_report_refuses_active_turn_and_bad_state(auth_adapter,
 
 
 @pytest.mark.asyncio
+async def test_session_messages_pages_two_compressions_without_summaries_or_duplicate_reports(
+    auth_adapter, session_db
+):
+    session_id = session_db.create_session("two-compressions", "api_server", session_key="owner:conversation")
+    session_db.append_message(session_id, "user", "first ordinary prompt")
+    session_db.append_message(session_id, "assistant", "first ordinary answer")
+    session_db.archive_and_compact(
+        session_id,
+        [{"role": "assistant", "content": "INTERNAL SUMMARY ONE", "_compressed_summary": True}],
+        watermark=session_db.get_active_message_watermark(session_id),
+    )
+    session_db.append_message(session_id, "user", "second ordinary prompt")
+    session_db.append_message(session_id, "assistant", "second ordinary answer")
+    # This report arrives after the second compression snapshot and is copied into the live tail.
+    second_watermark = session_db.get_active_message_watermark(session_id)
+    text = "✓ **Task — done**\n\nResult: unique report payload"
+    payload = {"task_id": "task-page", "generation": "4", "title": "Task", "state": "done", "text": text}
+    app = _create_session_app(auth_adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        headers = {"Authorization": "Bearer sk-test"}
+        appended = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        assert appended.status == 200
+        bound = await appended.json()
+
+        session_db.archive_and_compact(
+            session_id,
+            [{"role": "assistant", "content": "INTERNAL SUMMARY TWO", "_compressed_summary": True}],
+            watermark=second_watermark,
+        )
+        session_db.append_message(session_id, "assistant", "final ordinary answer")
+
+        retry = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        retry_body = await retry.json()
+        pages = []
+        for offset in (0, 2, 4):
+            response = await cli.get(
+                f"/api/sessions/{session_id}/messages?limit=2&offset={offset}&order=oldest", headers=headers)
+            assert response.status == 200
+            body = await response.json()
+            assert body["session_id"] == session_id
+            assert body["pagination"]["offset"] == offset
+            pages.extend(body["data"])
+
+    assert retry_body["created"] is False
+    assert retry_body["session_id"] == bound["session_id"]
+    assert retry_body["message_id"] == bound["message_id"]
+    assert [row["content"] for row in pages] == [
+        "first ordinary prompt", "first ordinary answer", "second ordinary prompt",
+        "second ordinary answer", text, "final ordinary answer",
+    ]
+    assert len({row["id"] for row in pages}) == len(pages)
+    reports = [row for row in pages if row.get("display_kind") == "iollo_task_report"]
+    assert len(reports) == 1
+    assert reports[0]["id"] == int(bound["message_id"])
+    assert reports[0]["session_id"] == bound["session_id"]
+    assert "unique report payload" in session_db.get_messages_as_conversation(session_id)[-2]["content"]
+
+
+@pytest.mark.asyncio
 async def test_session_messages_default_to_latest_bounded_page(adapter, session_db):
     session_id = session_db.create_session("bounded-messages", "api_server")
     session_db.replace_messages(

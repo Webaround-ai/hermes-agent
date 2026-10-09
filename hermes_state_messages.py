@@ -1171,7 +1171,8 @@ class SessionMessagesMixin:
         if not indexed:
             rows = self._fetch_conversation_rows(
                 lineage_ids, _DISPLAY_ACTIVE_CLAUSE, with_session_id=True)
-            messages = self._dedupe_display_generations(rows)
+            messages = [row for row in self._dedupe_display_generations(rows)
+                        if not row["_compressed_summary"]]
             selected = messages[::-1][offset:][:limit][::-1] if latest else messages[offset:][:limit]
             return [self._row_to_message_dict(row, warn_context="resume display history", summary_flag=True)
                     for row in selected]
@@ -1186,7 +1187,8 @@ class SessionMessagesMixin:
                     f"""WITH lineage(id) AS ({lineage_sql}),
                     candidates AS (
                         SELECT m.id, m.display_identity, m.active FROM messages m JOIN lineage l ON l.id = m.session_id
-                        WHERE (m.active = 1 OR m.compacted = 1){DISPLAY_VISIBLE_SQL}
+                        WHERE (m.active = 1 OR m.compacted = 1)
+                          AND COALESCE(m._compressed_summary, 0) = 0{DISPLAY_VISIBLE_SQL}
                     ),
                     logical_rows AS (
                         SELECT display_identity, MIN(id) AS first_id FROM candidates GROUP BY display_identity

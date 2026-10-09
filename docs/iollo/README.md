@@ -30,7 +30,7 @@ does not identify a deployed image. See cloud
 
 | Runtime seam | Source | Integration rule |
 |---|---|---|
-| Durable runs | `gateway/platforms/api_server_runs.py` | Preserve declared session key, idempotency, provider/effort, envelope context and prompt version |
+| Durable runs | `gateway/platforms/api_server_runs.py` | Preserve declared session key, idempotency, provider/effort, envelope context and prompt version. Each synchronous API-run worker executes with an isolated copy of its submitting task's `ContextVar` context, so trusted request provenance remains available to tools without leaking between runs. |
 | Tool profile / turn-ending tools | `agent/tool_profile.py`, `agent/turn_tool_round.py`, `agent/turn_api_request.py` | Per-run `tool_profile` projects requests only (agent, stored prompt, pin stay full); `ends_turn` ends a succeeded text+tool round; rc12: globs and `read_tools`; rc13: `hosted_tools` (annotated read-only MCP tools, budgeted) and per-run `skip_background_review`; see [IOLLO-FORK](../IOLLO-FORK.md) |
 | Prompt refresh | `agent/prompt_version.py`, `agent/conversation_loop.py` | Changed declared version rebuilds stored prompt and re-pins current tools once; transcript/session retained; compression inherits version |
 | Sessions | `hermes_state.py`, API server session handlers | Full owner-box transcript, distinct from control-plane retained copies |

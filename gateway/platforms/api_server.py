@@ -69,6 +69,7 @@ _STATIC_FEATURE_FLAGS = {
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
     "session_resources": True, "model_options": True, "session_chat": True,
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
+    "iollo_task_reports": True,
     "reasoning_streaming": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
@@ -93,6 +94,7 @@ _CAPABILITY_ENDPOINTS = (
     ("session_update", ("PATCH", "/api/sessions/{session_id}")),
     ("session_delete", ("DELETE", "/api/sessions/{session_id}")),
     ("session_messages", ("GET", "/api/sessions/{session_id}/messages")),
+    ("iollo_task_reports", ("POST", "/api/sessions/{session_id}/task-reports")),
     ("session_fork", ("POST", "/api/sessions/{session_id}/fork")),
     ("session_chat", ("POST", "/api/sessions/{session_id}/chat")),
     ("session_chat_stream", ("POST", "/api/sessions/{session_id}/chat/stream")),
@@ -1611,6 +1613,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             ("PATCH", "/api/sessions/{session_id}", self._handle_patch_session),
             ("DELETE", "/api/sessions/{session_id}", self._handle_delete_session),
             ("GET", "/api/sessions/{session_id}/messages", self._handle_session_messages),
+            ("POST", "/api/sessions/{session_id}/task-reports", self._handle_iollo_task_report),
             ("POST", "/api/sessions/{session_id}/fork", self._handle_fork_session),
             ("POST", "/api/sessions/{session_id}/chat", self._handle_session_chat),
             ("POST", "/api/sessions/{session_id}/chat/stream", self._handle_session_chat_stream),
@@ -2854,7 +2857,21 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "id", "session_id", "role", "content", "tool_call_id", "tool_calls", "tool_name",
             "timestamp", "token_count", "finish_reason", "reasoning", "reasoning_content",
             "display_kind")
-        return {key: message.get(key) for key in safe_keys if key in message}
+        response = {key: message.get(key) for key in safe_keys if key in message}
+        # A task report is persisted as a model-facing user event so it can be appended between
+        # turns without violating transcript role alternation. Its display projection is the
+        # exact assistant-facing text the owner saw in the task envelope.
+        if message.get("display_kind") == "iollo_task_report":
+            metadata = message.get("display_metadata")
+            display_text = metadata.get("display_text") if isinstance(metadata, dict) else None
+            if isinstance(display_text, str) and display_text.strip():
+                try:
+                    display_size = len(display_text.encode("utf-8"))
+                except UnicodeEncodeError:
+                    display_size = 32_769
+                if display_size <= 32_768:
+                    response.update(role="assistant", display_role="assistant", content=display_text)
+        return response
 
     async def _read_json_body(self, request: "web.Request") -> tuple[Dict[str, Any], Optional["web.Response"]]:
         try:
@@ -3106,6 +3123,62 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "limit": limit, "offset": offset,
                 "order": order or ("latest" if default_page else "oldest"),
                 "returned": len(messages)}})
+
+    @_require_auth
+    async def _handle_iollo_task_report(self, request: "web.Request") -> "web.Response":
+        """Append one exact-origin task completion as a native, idempotent transcript event.
+
+        Iollo's control plane owns task scheduling; Hermes owns the conversation content. Keep the
+        final formatted text byte-for-byte as supplied, and bind retries to the originating session
+        lineage plus (task_id, generation). This endpoint never starts a model turn.
+        """
+        requested_session_id = request.match_info["session_id"]
+        _, err = await self._get_existing_session_or_404(requested_session_id)
+        if err:
+            return err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        if set(body) != {"task_id", "generation", "title", "state", "text"}:
+            return _error_response("Task report fields are invalid", 400, code="invalid_task_report")
+
+        def opaque_id(value: Any) -> Optional[str]:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return str(value) if value > 0 else None
+            if isinstance(value, str) and value.strip() and len(value) <= 128 and value == value.strip():
+                return value
+            return None
+
+        task_id, generation = opaque_id(body.get("task_id")), opaque_id(body.get("generation"))
+        title, state, text = body.get("title"), body.get("state"), body.get("text")
+        try:
+            text_size = len(text.encode("utf-8")) if isinstance(text, str) else 32_769
+        except UnicodeEncodeError:
+            text_size = 32_769
+        if (task_id is None or generation is None or not isinstance(title, str) or not title.strip()
+                or len(title) > 256 or not isinstance(state, str) or state not in {"done", "failed", "scheduled"}
+                or not isinstance(text, str) or not text.strip() or text_size > 32_768):
+            return _error_response("Task report fields are invalid", 400, code="invalid_task_report")
+
+        db = await self._ensure_session_db_async()
+        if db is None:
+            return self._session_db_unavailable()
+        try:
+            resolved_id = await asyncio.to_thread(db.resolve_resume_session_id, requested_session_id)
+            row_session_id, row_id, created = await asyncio.to_thread(
+                db.append_iollo_task_report, resolved_id, text, task_id=task_id, generation=generation,
+                title=title.strip(), state=state)
+        except Exception as exc:
+            from hermes_state_errors import CompressionSessionClosedError, SessionTurnLeaseLostError
+            if isinstance(exc, (CompressionSessionClosedError, SessionTurnLeaseLostError)):
+                return _error_response("Task report could not be appended while the session is changing or active",
+                                       409, code="task_report_session_busy")
+            logger.exception("Iollo task report append failed")
+            return _error_response("Task report could not be appended", 500, code="task_report_failed")
+        return web.json_response({"object": "hermes.iollo.task_report", "session_id": row_session_id,
+                                  "message_id": str(row_id), "created": created})
 
     @_require_auth
     async def _handle_fork_session(self, request: "web.Request") -> "web.Response":

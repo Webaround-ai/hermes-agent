@@ -1855,6 +1855,7 @@ class _PreToolCallDirective:
     action: Optional[str] = None
     message: Optional[str] = None
     rule_key: Optional[str] = None
+    require_human: bool = False
     modified_args: Optional[Dict[str, Any]] = None
 
 
@@ -1876,11 +1877,13 @@ def _get_pre_tool_call_directive_details(
     middleware_trace: Optional[List[Dict[str, Any]]] = None,
 ) -> _PreToolCallDirective:
     """Check ``pre_tool_call`` hooks for ``{"action": "block", "message"}`` (veto; message becomes
-    the tool result) or ``{"action": "approve", "message", "rule_key"?}`` (escalate ANY tool to the
+    the tool result) or ``{"action": "approve", "message", "rule_key"?, "require_human"?}`` (escalate ANY tool to the
     human-approval gate; ``rule_key`` picks the ``[a]lways`` allowlist grain). Precedence is
     ``block`` > ``approve`` > none, not registration order: any plugin's valid veto wins over an
     earlier plugin's request for human confirmation (#87420); among approves the first valid one
-    wins. Irrelevant returns are ignored."""
+    wins. A trusted hook may set ``require_human: true`` to require a fresh owner decision that
+    ignores generic approval-off/yolo/cached approvals and fails closed without an owner bridge.
+    Irrelevant returns are ignored."""
     allowed = getattr(_thread_tool_whitelist, "allowed", None)
     if allowed is not None and tool_name not in allowed:
         fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
@@ -1892,7 +1895,8 @@ def _get_pre_tool_call_directive_details(
         api_request_id=api_request_id, middleware_trace=list(middleware_trace or []),
     )
     modified_args: Optional[Dict[str, Any]] = None
-    first_approve: Optional[Tuple[Optional[str], Optional[str]]] = None  # (message, rule_key)
+    first_approve: Optional[Tuple[Optional[str], Optional[str], bool]] = None  # (message, rule_key, require_human)
+    first_required_approve: Optional[Tuple[Optional[str], Optional[str], bool]] = None
     for result in hook_results:
         if not isinstance(result, dict):
             continue
@@ -1916,12 +1920,19 @@ def _get_pre_tool_call_directive_details(
         if action == "block":
             return _PreToolCallDirective(action="block", message=message, modified_args=modified_args)
         # approve is held back until the whole list has been scanned for a veto.
-        if first_approve is None:
-            rule_key = result.get("rule_key")
-            first_approve = (message, (rule_key.strip() or None) if isinstance(rule_key, str) else None)
+        rule_key = result.get("rule_key")
+        directive = (message, (rule_key.strip() or None) if isinstance(rule_key, str) else None,
+                     result.get("require_human") is True)
+        if directive[2]:
+            if first_required_approve is None:
+                first_required_approve = directive
+        elif first_approve is None:
+            first_approve = directive
+    if first_required_approve is not None:
+        first_approve = first_required_approve
     if first_approve is not None:
         return _PreToolCallDirective(action="approve", message=first_approve[0], rule_key=first_approve[1],
-                                     modified_args=modified_args)
+                                     require_human=first_approve[2], modified_args=modified_args)
     return _PreToolCallDirective(modified_args=modified_args)
 
 
@@ -1968,7 +1979,8 @@ def _resolve_block_from_details(
             approval_tokens = set_current_observability_context(
                 turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id)
         try:
-            result = request_tool_approval(tool_name, details.message or "", rule_key=details.rule_key or tool_name)
+            result = request_tool_approval(tool_name, details.message or "", rule_key=details.rule_key or tool_name,
+                                           require_human=details.require_human)
         finally:
             if approval_tokens is not None:
                 with suppress(Exception):

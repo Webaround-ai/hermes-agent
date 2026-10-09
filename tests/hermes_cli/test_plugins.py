@@ -1788,6 +1788,41 @@ class TestPreToolCallDirective:
         assert (details.action, details.message, details.rule_key) == ("approve", "first", "write_file:ssh")
         assert details.modified_args == {"path": "/p", "content": "fixed"}
 
+    def test_first_approve_preserves_explicit_owner_requirement(self, monkeypatch):
+        from hermes_cli.plugins import _get_pre_tool_call_directive_details
+        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda hook_name, **kwargs: [
+            {"action": "approve", "message": "payment", "require_human": True},
+            {"action": "approve", "message": "generic"},
+        ])
+        details = _get_pre_tool_call_directive_details("commit_purchase", {})
+        assert (details.action, details.message, details.require_human) == ("approve", "payment", True)
+
+    @pytest.mark.parametrize("directives", [
+        [
+            {"action": "approve", "message": "generic", "rule_key": "generic"},
+            {"action": "approve", "message": "payment", "rule_key": "payment", "require_human": True},
+        ],
+        [
+            {"action": "approve", "message": "payment", "rule_key": "payment", "require_human": True},
+            {"action": "approve", "message": "generic", "rule_key": "generic"},
+        ],
+    ])
+    def test_explicit_owner_requirement_outranks_generic_approve(self, monkeypatch, directives):
+        from hermes_cli.plugins import _get_pre_tool_call_directive_details
+        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda hook_name, **kwargs: directives)
+        details = _get_pre_tool_call_directive_details("commit_purchase", {})
+        assert (details.action, details.message, details.rule_key, details.require_human) == (
+            "approve", "payment", "payment", True)
+
+    def test_block_still_outranks_mandatory_owner_approve(self, monkeypatch):
+        from hermes_cli.plugins import _get_pre_tool_call_directive_details
+        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda hook_name, **kwargs: [
+            {"action": "approve", "message": "payment", "require_human": True},
+            {"action": "block", "message": "payment hard stop"},
+        ])
+        details = _get_pre_tool_call_directive_details("commit_purchase", {})
+        assert (details.action, details.message, details.require_human) == ("block", "payment hard stop", False)
+
 
 class TestResolvePreToolBlock:
     """Tests for the single dispatch-site chokepoint that resolves a
@@ -1851,6 +1886,26 @@ class TestResolvePreToolBlock:
             "reason": "why",
             "rule_key": "write_file:ssh",
         }
+
+    def test_required_owner_hook_uses_real_gate_when_generic_mode_is_off(self, monkeypatch):
+        from hermes_cli.plugins import resolve_pre_tool_block
+        from tools import approval_context
+        import tools.approval as approval
+        import tools.approval_prompt as approval_prompt
+
+        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda hook_name, **kwargs: [
+            {"action": "approve", "message": "tier3:pay: commit:c-test", "rule_key": "pay:c-test",
+             "require_human": True}])
+        monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval_context, "_is_gateway_approval_context", lambda: False)
+        prompts = []
+        monkeypatch.setattr(approval, "prompt_dangerous_approval", lambda *a, **k: prompts.append(k) or "once")
+        monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval",
+                            lambda *a, **k: prompts.append(k) or "once")
+        assert resolve_pre_tool_block("commit_purchase", {}) is None
+        assert prompts
 
 
     def test_approve_gate_exception_fails_closed(self, monkeypatch):

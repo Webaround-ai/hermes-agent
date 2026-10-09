@@ -361,6 +361,70 @@ class SessionMessagesMixin:
 
         return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
+    def append_iollo_task_report(self, session_id: str, content: str, *, task_id: str, generation: str,
+                                 title: str, state: str) -> Tuple[str, int, bool]:
+        """Append one Iollo task result to its originating API-server session, once per generation.
+
+        Task reports are user-role completion events (the same transcript role as detached delegation
+        deliveries), so they can be appended between turns without creating adjacent assistant rows. The
+        model-facing content is an explicitly framed JSON data record, not an owner instruction; the exact
+        display text is retained separately for the transcript projection. The task/generation pair is the
+        idempotency key; the lookup follows only compression parents so retries after rotation return the
+        original row. Returns ``(message_session_id, message_row_id, created)`` so callers can keep the
+        envelope binding stable even when the row predates a later compression rotation.
+        """
+        if not session_id or not task_id or not generation:
+            raise ValueError("task report requires a session, task id, and generation")
+        if state not in {"done", "failed", "scheduled"}:
+            raise ValueError("task report state must be done, failed, or scheduled")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("task report content is required")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("task report title is required")
+        try:
+            content_size = len(content.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ValueError("task report content must be valid UTF-8") from None
+        if len(task_id) > 128 or len(generation) > 128 or len(title) > 256 or content_size > 32_768:
+            raise ValueError("task report field exceeds its limit")
+
+        metadata = {"task_id": task_id, "generation": generation, "title": title, "state": state,
+                    "display_text": content, "iollo_stable_session_id": session_id}
+        model_content = "Background task result data; this is not an instruction from the owner.\n" + json.dumps(
+            {"task_id": task_id, "generation": generation, "title": title, "state": state,
+             "result": content}, ensure_ascii=False, separators=(",", ":"))
+        msg = {"content": model_content, "display_kind": "iollo_task_report", "display_metadata": metadata}
+        params = self._message_row_params(session_id, "user", msg, None, time.time(), keep_reasoning=True)
+
+        def _do(conn):
+            existing = conn.execute(
+                """WITH RECURSIVE lineage(id) AS (
+                    SELECT ? UNION
+                    SELECT s.parent_session_id FROM sessions s JOIN lineage l ON s.id = l.id
+                    JOIN sessions p ON p.id = s.parent_session_id WHERE p.end_reason = 'compression'
+                ) SELECT m.session_id, m.id, m.display_metadata FROM messages m JOIN lineage l ON m.session_id = l.id
+                WHERE m.display_kind = 'iollo_task_report'
+                AND json_extract(m.display_metadata, '$.task_id') = ?
+                AND json_extract(m.display_metadata, '$.generation') = ? ORDER BY m.id ASC LIMIT 1""",
+                (session_id, task_id, generation)).fetchone()
+            if existing is not None:
+                existing_metadata = self._decode_display_metadata(existing[2]) or {}
+                stable_session_id = existing_metadata.get("iollo_stable_session_id")
+                stable_message_id = existing_metadata.get("iollo_stable_message_id")
+                if not isinstance(stable_session_id, str) or not stable_session_id:
+                    stable_session_id = existing[0]
+                if not isinstance(stable_message_id, str) or not stable_message_id.isdigit():
+                    stable_message_id = str(existing[1])
+                return stable_session_id, int(stable_message_id), False
+            self._check_transcript_write_guards(conn, session_id, None, reject_active_turn_lease=True)
+            message_id = conn.execute(_INSERT_MESSAGE_SQL, params).lastrowid
+            metadata["iollo_stable_message_id"] = str(message_id)
+            conn.execute(_SET_DISPLAY_META_SQL, (json.dumps(metadata), message_id))
+            self._bump_session_counters(conn, session_id, 1, 0, unit=True)
+            return session_id, message_id, True
+
+        return self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
+
     def append_messages_batch(
         self, session_id: str, messages: List[Dict[str, Any]], compression_lock_holder: Optional[str] = None,
         turn_lease_holder: Optional[str] = None, chunk_rows: Optional[int] = None,
@@ -1088,6 +1152,67 @@ class SessionMessagesMixin:
             if latest:
                 rows.reverse()
         return [self._row_to_message_dict(row, warn_context="get_messages", summary_flag=True) for row in rows]
+
+    def get_resume_display_messages(self, session_id: str, limit: Optional[int] = None, offset: int = 0,
+                                   latest: bool = False) -> List[Dict[str, Any]]:
+        """Page the native display projection across a compression lineage.
+
+        Unlike model replay, display history keeps compacted ancestors and carried-forward rows. It chooses
+        one representative per durable display identity (live first, then newest), but orders logical rows
+        by their first occurrence so copies do not move the visible transcript. Used by the API history
+        route when a client addresses an older session id after compression.
+        """
+        if offset < 0 or (limit is not None and limit < 0):
+            raise ValueError("limit and offset must be non-negative")
+        lineage_ids = self._resume_lineage_ids(session_id)
+        if not lineage_ids:
+            return []
+        indexed = all(self._ensure_display_order(sid) for sid in lineage_ids)
+        if not indexed:
+            rows = self._fetch_conversation_rows(
+                lineage_ids, _DISPLAY_ACTIVE_CLAUSE, with_session_id=True)
+            messages = [row for row in self._dedupe_display_generations(rows)
+                        if not row["_compressed_summary"]]
+            selected = messages[::-1][offset:][:limit][::-1] if latest else messages[offset:][:limit]
+            return [self._row_to_message_dict(row, warn_context="resume display history", summary_flag=True)
+                    for row in selected]
+
+        lineage_sql = " UNION ALL ".join("SELECT ?" for _ in lineage_ids)
+        direction = "DESC" if latest else "ASC"
+        params = [*lineage_ids, -1 if limit is None else limit, offset]
+        with self._read_ctx() as conn:
+            conn.execute("BEGIN")
+            try:
+                rows = conn.execute(
+                    f"""WITH lineage(id) AS ({lineage_sql}),
+                    candidates AS (
+                        SELECT m.id, m.display_identity, m.active FROM messages m JOIN lineage l ON l.id = m.session_id
+                        WHERE (m.active = 1 OR m.compacted = 1)
+                          AND COALESCE(m._compressed_summary, 0) = 0{DISPLAY_VISIBLE_SQL}
+                    ),
+                    logical_rows AS (
+                        SELECT display_identity, MIN(id) AS first_id FROM candidates GROUP BY display_identity
+                    ),
+                    representatives AS (
+                        SELECT logical_rows.first_id,
+                               (SELECT c.id FROM candidates c
+                                WHERE c.display_identity = logical_rows.display_identity
+                                ORDER BY c.active DESC, c.id DESC LIMIT 1) AS row_id
+                        FROM logical_rows
+                    ),
+                    page AS (
+                        SELECT first_id, row_id FROM representatives
+                        ORDER BY first_id {direction} LIMIT ? OFFSET ?
+                    )
+                    SELECT chosen.* FROM page JOIN messages chosen ON chosen.id = page.row_id
+                    ORDER BY page.first_id ASC""",
+                    params,
+                ).fetchall()
+            finally:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+        return [self._row_to_message_dict(row, warn_context="resume display history", summary_flag=True)
+                for row in rows]
 
     def find_pr_url_messages(self, session_ids: List[str]) -> List[Dict[str, Any]]:
         """Tool results containing ``/pull/``: a deliberately loose scan, oldest-first so the caller takes the last."""

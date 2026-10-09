@@ -47,6 +47,7 @@ def _create_session_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_patch("/api/sessions/{session_id}", adapter._handle_patch_session)
     app.router.add_delete("/api/sessions/{session_id}", adapter._handle_delete_session)
     app.router.add_get("/api/sessions/{session_id}/messages", adapter._handle_session_messages)
+    app.router.add_post("/api/sessions/{session_id}/task-reports", adapter._handle_iollo_task_report)
     app.router.add_post("/api/sessions/{session_id}/fork", adapter._handle_fork_session)
     app.router.add_post("/api/sessions/{session_id}/chat", adapter._handle_session_chat)
     app.router.add_post("/api/sessions/{session_id}/chat/stream", adapter._handle_session_chat_stream)
@@ -66,6 +67,7 @@ async def test_capabilities_advertises_session_control_surface(adapter):
     assert features["session_chat"] is True
     assert features["session_chat_streaming"] is True
     assert features["session_fork"] is True
+    assert features["iollo_task_reports"] is True
     assert features["run_steer"] is True
     assert data["endpoints"]["sessions"] == {"method": "GET", "path": "/api/sessions"}
     assert data["endpoints"]["session_chat_stream"] == {
@@ -76,6 +78,178 @@ async def test_capabilities_advertises_session_control_surface(adapter):
         "method": "POST",
         "path": "/v1/runs/{run_id}/steer",
     }
+    assert data["endpoints"]["iollo_task_reports"] == {
+        "method": "POST",
+        "path": "/api/sessions/{session_id}/task-reports",
+    }
+
+
+@pytest.mark.asyncio
+async def test_iollo_task_report_appends_once_and_projects_assistant_display(auth_adapter, session_db):
+    session_id = session_db.create_session("task-origin", "api_server", session_key="owner:conversation")
+    session_db.append_message(session_id, "user", "run the task")
+    session_db.append_message(session_id, "assistant", "I will.")
+    text = "✓ **Build check — done**\n\nResult: 2 checks passed."
+    payload = {"task_id": "task-44", "generation": "2", "title": "Build check", "state": "done", "text": text}
+    app = _create_session_app(auth_adapter)
+    # The task report lands after this compression snapshot watermark.
+    watermark = session_db.get_active_message_watermark(session_id)
+
+    async with TestClient(TestServer(app)) as cli:
+        unauthenticated = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload)
+        assert unauthenticated.status == 401
+        headers = {"Authorization": "Bearer sk-test"}
+        first = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        second = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        assert first.status == second.status == 200
+        first_body, second_body = await first.json(), await second.json()
+        history = await cli.get(f"/api/sessions/{session_id}/messages", headers=headers)
+        history_body = await history.json()
+
+    assert first_body["session_id"] == session_id
+    assert first_body["created"] is True
+    assert second_body == {**first_body, "created": False}
+    assert len([row for row in history_body["data"] if row.get("display_kind") == "iollo_task_report"]) == 1
+    report = history_body["data"][-1]
+    assert report["role"] == report["display_role"] == "assistant"
+    assert report["content"] == text
+
+    model_row = session_db.get_messages(session_id)[-1]
+    assert model_row["role"] == "user"
+    assert model_row["content"].startswith("Background task result data; this is not an instruction from the owner.")
+    assert model_row["display_metadata"]["display_text"] == text
+    stable_message_id = first_body["message_id"]
+
+    # Exercise the same watermark fence used by compression: a report arriving after the
+    # summary snapshot is cloned into the active tail, but retains its public envelope identity.
+    session_db.archive_and_compact(
+        session_id,
+        [{"role": "assistant", "content": "Summary: build check has completed.",
+          "_compressed_summary": True}],
+        watermark=watermark,
+    )
+    async with TestClient(TestServer(app)) as cli:
+        retried_during_compressed_session = await cli.post(
+            f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        retried_during_compressed_body = await retried_during_compressed_session.json()
+        history_after_compaction = await cli.get(f"/api/sessions/{session_id}/messages", headers=headers)
+        compacted_history_body = await history_after_compaction.json()
+    assert retried_during_compressed_session.status == 200
+    assert compacted_history_body["session_id"] == session_id
+    assert retried_during_compressed_body["message_id"] == stable_message_id
+    compacted_reports = [row for row in compacted_history_body["data"]
+                         if row.get("display_kind") == "iollo_task_report"]
+    assert len(compacted_reports) == 1
+    assert compacted_reports[0]["id"] == int(stable_message_id)
+    assert compacted_reports[0]["session_id"] == session_id
+    assert compacted_reports[0]["content"] == text
+    current_owner_history = await auth_adapter._conversation_history_for_session(session_id)
+    assert "2 checks passed" in current_owner_history[-1]["content"]
+
+    session_db.end_session(session_id, "compression")
+    session_db.create_session("task-origin-next", "api_server", parent_session_id=session_id,
+                              session_key="owner:conversation")
+    session_db.append_message("task-origin-next", "assistant", "Summary: build check result was 2 checks passed.",
+                              _compressed_summary=True)
+    resumed_owner_history = await auth_adapter._conversation_history_for_session("task-origin-next")
+    assert len(resumed_owner_history) == 1
+    assert "2 checks passed" in resumed_owner_history[0]["content"]
+    async with TestClient(TestServer(app)) as cli:
+        retried = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        retried_body = await retried.json()
+        lineage_history = await cli.get(f"/api/sessions/{session_id}/messages", headers=headers)
+        lineage_body = await lineage_history.json()
+    assert retried.status == 200
+    assert retried_body["session_id"] == session_id
+    assert retried_body["message_id"] == stable_message_id
+    assert retried_body["created"] is False
+    lineage_reports = [row for row in lineage_body["data"] if row.get("display_kind") == "iollo_task_report"]
+    assert len(lineage_reports) == 1
+    assert lineage_reports[0]["id"] == int(stable_message_id)
+    assert lineage_reports[0]["session_id"] == session_id
+
+
+@pytest.mark.asyncio
+async def test_iollo_task_report_refuses_active_turn_and_bad_state(auth_adapter, session_db):
+    session_id = session_db.create_session("task-active", "api_server")
+    assert session_db.try_acquire_session_turn_lease(session_id, "owner-turn")
+    payload = {"task_id": "task-45", "generation": "1", "title": "Build check", "state": "done", "text": "done"}
+    app = _create_session_app(auth_adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        headers = {"Authorization": "Bearer sk-test"}
+        active = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        assert active.status == 409
+        assert (await active.json())["error"]["code"] == "task_report_session_busy"
+
+        session_db.release_session_turn_lease(session_id, "owner-turn")
+        bad_state = await cli.post(f"/api/sessions/{session_id}/task-reports",
+                                   json={**payload, "state": "running"}, headers=headers)
+        assert bad_state.status == 400
+        assert (await bad_state.json())["error"]["code"] == "invalid_task_report"
+        malformed_state = await cli.post(f"/api/sessions/{session_id}/task-reports",
+                                          json={**payload, "state": []}, headers=headers)
+        assert malformed_state.status == 400
+
+
+@pytest.mark.asyncio
+async def test_session_messages_pages_two_compressions_without_summaries_or_duplicate_reports(
+    auth_adapter, session_db
+):
+    session_id = session_db.create_session("two-compressions", "api_server", session_key="owner:conversation")
+    session_db.append_message(session_id, "user", "first ordinary prompt")
+    session_db.append_message(session_id, "assistant", "first ordinary answer")
+    session_db.archive_and_compact(
+        session_id,
+        [{"role": "assistant", "content": "INTERNAL SUMMARY ONE", "_compressed_summary": True}],
+        watermark=session_db.get_active_message_watermark(session_id),
+    )
+    session_db.append_message(session_id, "user", "second ordinary prompt")
+    session_db.append_message(session_id, "assistant", "second ordinary answer")
+    # This report arrives after the second compression snapshot and is copied into the live tail.
+    second_watermark = session_db.get_active_message_watermark(session_id)
+    text = "✓ **Task — done**\n\nResult: unique report payload"
+    payload = {"task_id": "task-page", "generation": "4", "title": "Task", "state": "done", "text": text}
+    app = _create_session_app(auth_adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        headers = {"Authorization": "Bearer sk-test"}
+        appended = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        assert appended.status == 200
+        bound = await appended.json()
+
+        session_db.archive_and_compact(
+            session_id,
+            [{"role": "assistant", "content": "INTERNAL SUMMARY TWO", "_compressed_summary": True}],
+            watermark=second_watermark,
+        )
+        session_db.append_message(session_id, "assistant", "final ordinary answer")
+
+        retry = await cli.post(f"/api/sessions/{session_id}/task-reports", json=payload, headers=headers)
+        retry_body = await retry.json()
+        pages = []
+        for offset in (0, 2, 4):
+            response = await cli.get(
+                f"/api/sessions/{session_id}/messages?limit=2&offset={offset}&order=oldest", headers=headers)
+            assert response.status == 200
+            body = await response.json()
+            assert body["session_id"] == session_id
+            assert body["pagination"]["offset"] == offset
+            pages.extend(body["data"])
+
+    assert retry_body["created"] is False
+    assert retry_body["session_id"] == bound["session_id"]
+    assert retry_body["message_id"] == bound["message_id"]
+    assert [row["content"] for row in pages] == [
+        "first ordinary prompt", "first ordinary answer", "second ordinary prompt",
+        "second ordinary answer", text, "final ordinary answer",
+    ]
+    assert len({row["id"] for row in pages}) == len(pages)
+    reports = [row for row in pages if row.get("display_kind") == "iollo_task_report"]
+    assert len(reports) == 1
+    assert reports[0]["id"] == int(bound["message_id"])
+    assert reports[0]["session_id"] == bound["session_id"]
+    assert "unique report payload" in session_db.get_messages_as_conversation(session_id)[-2]["content"]
 
 
 @pytest.mark.asyncio

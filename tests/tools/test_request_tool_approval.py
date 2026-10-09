@@ -247,3 +247,99 @@ class TestRequestToolApproval:
         )
         res = request_tool_approval("computer_use", "click", rule_key="cua")
         assert res == {"approved": True, "message": None}
+
+    def test_explicit_owner_request_bypasses_off_and_cached_allow_but_prompts_once(self, monkeypatch):
+        """Trusted explicit consent requests still need a fresh owner decision under generic mode-off."""
+        monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
+        monkeypatch.setattr(approval, "_yolo_active", lambda: True)
+        monkeypatch.setattr(approval, "is_approved", lambda sk, pk: True)
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: False)
+        prompts = []
+        monkeypatch.setattr(approval, "prompt_dangerous_approval",
+                            lambda *a, **k: prompts.append((a, k)) or "once")
+        monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval",
+                            lambda *a, **k: prompts.append((a, k)) or "once")
+        result = request_tool_approval("commit_purchase", "Pay EUR 12.00", rule_key="commit:c-abc",
+                                       require_human=True)
+        assert result["approved"] is True and prompts
+
+    def test_explicit_owner_request_does_not_persist_session_or_always_choices(self, monkeypatch):
+        monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: False)
+        monkeypatch.setattr(approval, "prompt_dangerous_approval", lambda *a, **k: "always")
+        monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval", lambda *a, **k: "always")
+        stored = []
+        monkeypatch.setattr(approval, "_persist_choice", lambda *a, **k: stored.append(a))
+        result = request_tool_approval("commit_purchase", "Pay EUR 12.00", rule_key="commit:c-abc",
+                                       require_human=True)
+        assert result["approved"] is True and stored == []
+
+    def test_explicit_owner_request_fails_closed_without_bridge_even_if_unattended_approves(self, monkeypatch):
+        monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
+        monkeypatch.setattr(approval, "_presence", lambda callback=None: (callback, False, False, False))
+        monkeypatch.setattr(approval_context, "_get_unattended_approval_mode", lambda: "approve")
+        result = request_tool_approval("commit_purchase", "Pay EUR 12.00", rule_key="commit:c-abc",
+                                       require_human=True)
+        assert result["approved"] is False
+        assert "no interactive user or gateway" in result["message"]
+
+    def test_explicit_owner_request_fails_closed_when_gateway_context_has_no_notifier(self, monkeypatch):
+        monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(approval, "_gateway_notify_cb", lambda session_key: None)
+        result = request_tool_approval("commit_purchase", "Pay EUR 12.00", rule_key="commit:no-bridge",
+                                       require_human=True)
+        assert result["approved"] is False
+        assert result.get("status") != "approval_required"
+        assert "no approval bridge" in result["message"]
+
+    def test_explicit_owner_gateway_disables_persistent_grants_and_deny_is_not_approval(self, monkeypatch):
+        monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: True)
+        notified = []
+        stored = []
+        monkeypatch.setattr(approval, "_persist_choice", lambda *a, **k: stored.append((a, k)))
+
+        def deny(data):
+            notified.append(data)
+            assert data["allow_session"] is False
+            assert data["allow_permanent"] is False
+            approval.resolve_gateway_approval("test-session", "deny", request_id=data["request_id"])
+
+        approval.register_gateway_notify("test-session", deny)
+        try:
+            result = request_tool_approval("commit_purchase", "Pay EUR 12.00", rule_key="commit:c-deny",
+                                           require_human=True)
+        finally:
+            approval.unregister_gateway_notify("test-session")
+
+        assert len(notified) == 1
+        assert result["approved"] is False
+        assert result["outcome"] == "denied"
+        assert stored == []
+
+    def test_explicit_owner_gateway_timeout_does_not_approve_or_persist(self, monkeypatch):
+        monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
+        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
+        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: True)
+        monkeypatch.setattr(approval, "_gateway_notify_cb", lambda session_key: lambda data: None)
+        monkeypatch.setattr(approval, "_await_gateway_decision",
+                            lambda *a, **k: {"choice": None, "reason": None, "resolved": False})
+        stored = []
+        monkeypatch.setattr(approval, "_persist_choice", lambda *a, **k: stored.append((a, k)))
+
+        result = request_tool_approval("commit_purchase", "Pay EUR 12.00", rule_key="commit:c-timeout",
+                                       require_human=True)
+
+        assert result["approved"] is False
+        assert result["outcome"] == "timeout"
+        assert stored == []

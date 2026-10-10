@@ -1,6 +1,7 @@
 """Durable ``/v1/runs`` admission, status, events, and control handlers."""
 
 import asyncio
+from contextvars import copy_context
 import hashlib
 import json
 import logging
@@ -51,7 +52,7 @@ def api_worker_live_count() -> int:
 
 
 def _submit_api_worker(loop, fn):
-    """``loop.run_in_executor(None, fn)`` with the worker-lifetime count held for the submission.
+    """Run ``fn`` with submitter context and hold the worker-lifetime count for submission.
 
     Increment on the submitting (handler) thread so the count is live before the worker can
     exit; decrement in the worker thread's own ``finally`` so handler cancellation cannot drop
@@ -60,6 +61,7 @@ def _submit_api_worker(loop, fn):
     count would make the shutdown close gate skip the SessionDB close for the process lifetime.
     """
     global _API_WORKER_LIVE
+    context = copy_context()
     with _API_WORKER_LOCK:
         _API_WORKER_LIVE += 1
 
@@ -71,8 +73,18 @@ def _submit_api_worker(loop, fn):
             with _API_WORKER_LOCK:
                 _API_WORKER_LIVE -= 1
 
+    # The API run is admitted in an async request task that carries trusted request
+    # metadata in ContextVars (for example the owner-box conversation origin). Bare
+    # run_in_executor() starts the synchronous agent turn in an empty context, so
+    # tools invoked by that turn cannot recover the request-scoped origin. Capture
+    # a separate context per submission; Context objects cannot be entered by two
+    # workers concurrently, while the copied contexts remain isolated from each
+    # other and from the submitting task.
+    def _run_in_context():
+        return context.run(_counted)
+
     try:
-        return loop.run_in_executor(None, _counted)
+        return loop.run_in_executor(None, _run_in_context)
     except BaseException:
         with _API_WORKER_LOCK:
             _API_WORKER_LIVE -= 1

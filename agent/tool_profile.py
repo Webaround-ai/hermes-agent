@@ -15,7 +15,9 @@ index. A wrong light guess costs one model call, never a lost reply. The run rep
 whether it was lifted (``tool_profile_report``).
 
 A ``tools`` entry may also be a glob (``*`` only, e.g. ``mcp__notion__*``), resolved against the session's real
-tools on every request; a pattern that matches nothing is ignored. ``read_tools`` (globs or names) adds a
+tools on every request, including its scoped pre-assembly catalog when Tool Search has deferred a requested
+plugin/MCP tool. Only that request's schema and dispatch allowlist are materialized; the stored pin is unchanged.
+A pattern that matches nothing is ignored. ``read_tools`` (globs or names) adds a
 connector's READ tools only: an MCP tool whose discovery-time ``readOnlyHint`` is exactly True and whose own name
 carries no write verb; anything else (no annotation, utilities, built-ins) stays with every tool. The read tools are
 bounded per request (``MAX_READ_TOOLS`` tools, ``MAX_READ_CHARS`` schema characters, about 4k tokens): over either
@@ -230,6 +232,7 @@ def _valid_entry(value: Any) -> bool:
 def set_tool_profile(agent: Any, profile: Optional[ToolProfile]) -> None:
     """Declare this run's profile on a freshly built agent (before ``run_conversation``). A profile without
     tools projects nothing; it only names the run in its report."""
+    _clear_profile_dispatch_names(agent)
     agent._tool_profile = profile if profile is not None and profile.tools is not None else None
     agent._tool_profile_requested = profile
     agent._tool_profile_lifted = None
@@ -265,22 +268,104 @@ def _lifting_names(names: Iterable[str]) -> set:
 
 def project_tools(agent: Any, tools: Optional[List[Any]]) -> Optional[List[Any]]:
     """The tools this request may declare; returns the same list object when nothing is removed."""
-    if not tools:
-        return tools
-    names = [_tool_name(t) for t in tools]
-    lifting = _lifting_names(names)
     profile = active_tool_profile(agent)
     if profile is None:
+        _clear_profile_dispatch_names(agent)
+        if not tools:
+            return tools
+        names = [_tool_name(t) for t in tools]
+        lifting = _lifting_names(names)
         keep = [t for t, n in zip(tools, names) if n not in lifting]
+        return tools if len(keep) == len(tools) else keep
+    tools = list(tools or [])
+    # Tool Search replaces deferred plugin/MCP schemas with its three bridge
+    # tools during agent setup. A per-run profile naming one of those real
+    # tools must project the original, session-scoped schema directly; the
+    # bridge is for discovery, not a prerequisite for an explicit choice.
+    catalog = _profile_catalog_tools(agent, profile, tools)
+    catalog_names = [_tool_name(t) for t in catalog]
+    catalog_lifting = _lifting_names(catalog_names)
+    allowed, reads = _resolve(profile, catalog, catalog_names, catalog_lifting)
+    agent._tool_profile_allowed = allowed
+    if reads is not None:
+        agent._tool_profile_reads = reads
+    keep = [_with_note(t, profile.note) if n in catalog_lifting else t
+            for t, n in zip(catalog, catalog_names) if n in allowed or n in catalog_lifting]
+    # Validation and direct dispatch use this request-local allowlist. Do not
+    # append to agent.tools: that is the session's stored/full pin and must
+    # remain unchanged across profile requests.
+    base = {_tool_name(t) for t in getattr(agent, "tools", []) or []}
+    _set_profile_dispatch_names(agent, {n for n in allowed | catalog_lifting if n not in base})
+    return keep
+
+
+def _clear_profile_dispatch_names(agent: Any) -> None:
+    _set_profile_dispatch_names(agent, set())
+
+
+def _set_profile_dispatch_names(agent: Any, names: set[str]) -> None:
+    valid = getattr(agent, "valid_tool_names", None)
+    previous = getattr(agent, "_tool_profile_dispatch_names", set())
+    if valid is not None:
+        valid.difference_update(previous)
+        added = names - valid
+        valid.update(added)
     else:
-        allowed, reads = _resolve(profile, tools, names, lifting)
-        agent._tool_profile_allowed = allowed
-        if reads is not None:
-            agent._tool_profile_reads = reads
-        keep = [_with_note(t, profile.note) if n in lifting else t
-                for t, n in zip(tools, names) if n in allowed or n in lifting]
-        return keep
-    return tools if len(keep) == len(tools) else keep
+        added = set()
+    agent._tool_profile_dispatch_names = set(added)
+
+
+def _profile_catalog_tools(agent: Any, profile: ToolProfile, visible_tools: List[Any]) -> List[Any]:
+    """Visible schemas plus profile-selected/read and profile-lifting schemas from the scoped catalog.
+
+    ``get_tool_definitions(..., skip_tool_search_assembly=True)`` is the same
+    allowlisted pre-assembly catalog used by Tool Search itself. We materialize
+    only names requested by this profile or its read patterns, plus the normal
+    lifting tools; retain the same one-shot and side-agent exclusions as agent
+    initialization.
+    """
+    by_name = {_tool_name(tool): tool for tool in visible_tools if _tool_name(tool)}
+    wanted = set(profile.tools or ())
+    patterns = (*profile.patterns, *profile.read_patterns)
+    for tool in visible_tools:
+        name = _tool_name(tool)
+        if name and (name in wanted or _matches(name, patterns)):
+            wanted.add(name)
+    try:
+        from tools.tool_search import BRIDGE_TOOL_NAMES
+        search_is_active = bool(set(by_name) & BRIDGE_TOOL_NAMES)
+    except Exception:
+        search_is_active = False
+    raw_needed = bool(search_is_active or patterns or wanted - set(by_name))
+    if not raw_needed:
+        return list(by_name.values())
+    try:
+        import model_tools
+        raw = model_tools.get_tool_definitions(
+            enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+            disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        ) or []
+        from agent.oneshot_footprint import prune_oneshot_tools
+        raw = prune_oneshot_tools(raw)
+        from tools.connectors.turn import side_agent_tool_drops
+        drops = side_agent_tool_drops(agent)
+        from tools.registry import registry
+        for tool in raw:
+            name = _tool_name(tool)
+            if not name or name in drops:
+                continue
+            entry = registry.get_entry(name)
+            if (name in wanted or _matches(name, patterns)
+                    or (entry is not None and getattr(entry, "lifts_tool_profile", False))):
+                by_name.setdefault(name, tool)
+    except Exception as exc:
+        # Fail this request visibly rather than silently producing an empty
+        # projection that looks like a successful no-tools profile.
+        logger.exception("deferred tool profile catalog unavailable")
+        raise RuntimeError("Unable to resolve this run's scoped tool profile") from exc
+    return list(by_name.values())
 
 
 def _matches(name: str, patterns: Iterable[str]) -> bool:

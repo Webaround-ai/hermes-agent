@@ -2726,6 +2726,48 @@ def heartbeat_fire_claim(job_id: str, *, expected_owner: str) -> bool:
     return _with_job(job_id, apply, False)
 
 
+# Outcomes of :func:`fire_claim_heartbeat_status`. ``record_missing`` (the job record is gone —
+# deleted by the owner-side API or by the run itself), ``claim_cleared`` (the record is there but
+# carries no claim, e.g. a terminal mark from another path) and ``owner_mismatch`` (another fire
+# holds the claim) are the three ways a running job loses its claim; ``ok`` refreshed it and
+# ``readopted`` re-stamped a claim a record rewrite dropped while this run was still in flight.
+FIRE_CLAIM_OK = "ok"
+FIRE_CLAIM_READOPTED = "readopted"
+FIRE_CLAIM_RECORD_MISSING = "record_missing"
+FIRE_CLAIM_CLEARED = "claim_cleared"
+FIRE_CLAIM_OWNER_MISMATCH = "owner_mismatch"
+_UNSET_LAST_RUN = object()
+
+
+def fire_claim_heartbeat_status(
+    job_id: str, *, expected_owner: str, run_started_last_run_at: Any = _UNSET_LAST_RUN,
+) -> Tuple[str, str]:
+    """:func:`heartbeat_fire_claim` with the reason: ``(status, detail)``.
+
+    ``run_started_last_run_at``: the record's ``last_run_at`` when this run began. When given, a
+    record whose claim was dropped by a rewrite (``fire_claim`` absent, record not terminal, and
+    ``last_run_at`` unchanged, so no other run has completed since) is re-adopted for this run
+    instead of reported lost: nobody else holds the slot, and a terminal mark — ours or another
+    path's — always stamps ``last_run_at``, so a finished run is never re-claimed. A claim held by
+    another owner is never taken over."""
+    def apply(jobs, _i, job):
+        claim = job.get("fire_claim")
+        if isinstance(claim, dict) and claim.get("by") == expected_owner:
+            _refresh_claim(jobs, claim, expected_owner)
+            return FIRE_CLAIM_OK, ""
+        if isinstance(claim, dict) and claim.get("by"):
+            return FIRE_CLAIM_OWNER_MISMATCH, f"held by {claim.get('by')} since {claim.get('at')}"
+        if (run_started_last_run_at is not _UNSET_LAST_RUN
+                and job.get("last_run_at") == run_started_last_run_at
+                and not is_terminal_job(job)):
+            job["fire_claim"] = {"at": _hermes_now().isoformat(), "by": expected_owner}
+            save_jobs(jobs)
+            return FIRE_CLAIM_READOPTED, "record rewritten without its claim; re-adopted for the live run"
+        return FIRE_CLAIM_CLEARED, f"no claim on record (last_run_at={job.get('last_run_at')})"
+
+    return _with_job(job_id, apply, (FIRE_CLAIM_RECORD_MISSING, "no job record with this id"))
+
+
 # Completed one-shots are retained in jobs.json (final status stays inspectable) and pruned by
 # _sweep_completed_oneshots once they age out.
 COMPLETED_ONESHOT_RETENTION_DAYS = 7

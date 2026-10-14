@@ -537,6 +537,7 @@ def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | No
 from cron.jobs import (
     _ensure_cron_dir, advance_next_runs, claim_dispatch, claim_job_for_fire, fire_claim_fence,
     clear_run_claim, get_due_jobs, heartbeat_fire_claim, heartbeat_run_claim, mark_job_run,
+    fire_claim_heartbeat_status, FIRE_CLAIM_OK, FIRE_CLAIM_READOPTED, FIRE_CLAIM_RECORD_MISSING,
     save_job_output, self_removal_delivery_allowed, self_removal_delivery_scope, use_cron_store)
 from cron.executions import (
     _TERMINAL_STATES, HANDOFF_ADOPTION_GRACE_SECONDS, create_execution, finish_execution,
@@ -1356,6 +1357,51 @@ _RUN_CLAIM_HEARTBEAT_SECONDS = 60.0
 _FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS = _RUN_CLAIM_HEARTBEAT_SECONDS * 3
 # Pause before re-sampling a fire-claim heartbeat miss; a genuinely re-owned claim misses twice.
 _FIRE_CLAIM_MISS_CONFIRM_SECONDS = 1.0
+# A run whose job record was DELETED (not re-owned) stops at the next tool boundary rather than
+# mid-tool: a browser purchase step is never cut in half. The wait for that boundary is bounded.
+_RECORD_DELETED_TOOL_BOUNDARY_MAX_WAIT_SECONDS = 600.0
+_RECORD_DELETED_POLL_SECONDS = 0.5
+# How often the agent-run monitor checks the claim, the inactivity flag and the one-shot run claim.
+_CRON_MONITOR_POLL_SECONDS = 5.0
+
+
+class _ClaimLostEvent(threading.Event):
+    """The fire-claim heartbeat's ``lost_ownership`` latch, carrying why it latched.
+
+    ``graceful`` is True only when the job record was deleted: no other run holds the slot, so the
+    live run may finish its current tool before it stops. A re-owned claim means another run is
+    live and keeps the immediate interrupt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reason = ""
+        self.detail = ""
+        self.graceful = False
+
+    def latch(self, reason: str, detail: str = "") -> None:
+        self.reason, self.detail = reason, detail
+        self.graceful = reason == FIRE_CLAIM_RECORD_MISSING
+        self.set()
+
+
+def _claim_loss_events(cancel_event) -> list:
+    if cancel_event is None:
+        return []
+    return list(getattr(cancel_event, "_events", None) or [cancel_event])
+
+
+def _claim_loss_is_graceful(cancel_event) -> bool:
+    """True when every set cancellation source is a deleted-record claim loss (no transport cancel,
+    no re-owned claim): the run may stop at the next tool boundary instead of mid-tool."""
+    fired = [event for event in _claim_loss_events(cancel_event) if event.is_set()]
+    return bool(fired) and all(getattr(event, "graceful", False) for event in fired)
+
+
+def _claim_loss_reason(cancel_event) -> str:
+    for event in _claim_loss_events(cancel_event):
+        if event.is_set() and getattr(event, "reason", ""):
+            return str(event.reason)
+    return ""
 
 
 def _cron_cleanup_timeout_seconds() -> float:
@@ -1899,7 +1945,7 @@ def _run_agent_with_watchdog(
     watchdog: default 600s, override HERMES_CRON_TIMEOUT, 0 = unlimited."""
     _cron_timeout = _cron_inactivity_seconds()
     _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
-    _POLL_INTERVAL = 5.0
+    _POLL_INTERVAL = _CRON_MONITOR_POLL_SECONDS
     # Heartbeat the one-shot run_claim while alive: without it a long run looks like a dead owner
     # and gets re-dispatched / stale-removed out from under the live run.
     # Keep the one-shot run_claim fresh while the run is alive (#62002): the claim TTL is a dead-owner
@@ -1913,12 +1959,29 @@ def _run_agent_with_watchdog(
     _run_claim_owner = str(_run_claim.get("by") or "") if isinstance(_run_claim, dict) else ""
     _last_claim_heartbeat = time.monotonic()
 
-    def _abort_if_fire_claim_lost() -> None:
+    _deleted_wait_since: Optional[float] = None
+
+    def _abort_if_fire_claim_lost(*, finished: bool = False) -> bool:
+        """Raise when the claim is lost. A deleted record waits for the next tool boundary: returns
+        True while it is still waiting (the caller polls faster), False when nothing is lost."""
+        nonlocal _deleted_wait_since
         if cancel_event is None or not cancel_event.is_set():
-            return
+            return False
+        reason = _claim_loss_reason(cancel_event)
+        if not finished and _claim_loss_is_graceful(cancel_event):
+            now = time.monotonic()
+            current_tool = getattr(agent, "_current_tool", None) if agent is not None else None
+            if _deleted_wait_since is None:
+                _deleted_wait_since = now
+                logger.warning(
+                    "Job '%s': job record was deleted while running; stopping at the next tool "
+                    "boundary (current tool: %s)", job_name, current_tool or "none")
+            if current_tool and now - _deleted_wait_since < _RECORD_DELETED_TOOL_BOUNDARY_MAX_WAIT_SECONDS:
+                return True
         if agent is not None and hasattr(agent, "interrupt"):
             agent.interrupt("Cron fire claim ownership was lost")
-        raise RuntimeError(f"Cron job '{job_name}' lost its durable fire claim ownership")
+        suffix = f" ({reason})" if reason else ""
+        raise RuntimeError(f"Cron job '{job_name}' lost its durable fire claim ownership{suffix}")
 
     def _heartbeat_run_claim_if_due():
         nonlocal _last_claim_heartbeat
@@ -1975,9 +2038,11 @@ def _run_agent_with_watchdog(
         else:
             result = None
             while True:
-                done, _ = concurrent.futures.wait({_cron_future}, timeout=_POLL_INTERVAL)
+                done, _ = concurrent.futures.wait(
+                    {_cron_future},
+                    timeout=_RECORD_DELETED_POLL_SECONDS if _deleted_wait_since is not None else _POLL_INTERVAL)
                 if done:
-                    _abort_if_fire_claim_lost()
+                    _abort_if_fire_claim_lost(finished=True)
                     result = _cron_future.result()
                     break
                 if _inactivity_timeout:
@@ -2254,6 +2319,29 @@ def _prepare_job_prompt(
     return None, prompt
 
 
+@contextlib.contextmanager
+def _cron_run_approval_bridge(run_id: str):
+    """While the agent runs, this cron run can ask its owner like a live /v1/runs run: run id = the
+    cron session id, approvals keyed by it (``tools.approval.open_cron_run_bridge``). Without a
+    provider (no api_server in this process) nothing is bound and cron approvals resolve as before."""
+    from tools.approval import open_cron_run_bridge
+    from tools.approval_context import reset_current_session_key, set_current_session_key
+
+    close = open_cron_run_bridge(run_id)
+    if close is None:
+        yield
+        return
+    token = set_current_session_key(run_id)
+    try:
+        yield
+    finally:
+        reset_current_session_key(token)
+        try:
+            close()
+        except Exception:
+            logger.warning("Cron run %s: approval bridge close failed", run_id, exc_info=True)
+
+
 _CRON_DELIVERY_VARS = (
     "HERMES_CRON_AUTO_DELIVER_PLATFORM",
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
@@ -2524,9 +2612,10 @@ def run_job(
             session_db=_session_db)
         _audit = _FireAudit(job, job_id, model)
 
-        result = _run_agent_with_watchdog(
-            agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
-            worker_state=_worker_state)
+        with _cron_run_approval_bridge(_cron_session_id):
+            result = _run_agent_with_watchdog(
+                agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
+                worker_state=_worker_state)
         final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
         if (setup.fallback_notice and final_response.strip() and not _is_cron_silence_response(final_response)
                 and _cron_failure_marker_error(final_response) is None):
@@ -2627,7 +2716,8 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
 
     job_id = str(job.get("id") or "")
     stop = threading.Event()
-    lost_ownership = threading.Event()
+    lost_ownership = _ClaimLostEvent()
+    run_started_last_run_at = job.get("last_run_at")
 
     def _finish_unstarted(error: str) -> None:
         execution_id = job.get("execution_id")
@@ -2653,13 +2743,30 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
         _finish_unstarted("Fire claim ownership lost before execution started.")
         return True
 
+    def _classify_miss() -> tuple:
+        """Why the heartbeat missed, from the store (logged at WARNING so an incident names its
+        cause); a record rewrite that dropped the claim while this run is live is re-adopted."""
+        try:
+            return fire_claim_heartbeat_status(
+                job_id, expected_owner=owner, run_started_last_run_at=run_started_last_run_at)
+        except Exception as error:
+            return "store_error", type(error).__name__
+
     def _heartbeat_loop() -> None:
         last_confirmed = time.monotonic()
+        failing_since_logged = False
         while not stop.wait(_RUN_CLAIM_HEARTBEAT_SECONDS):
             try:
                 if not heartbeat_fire_claim(job_id, expected_owner=owner):
                     if self_removal_delivery_allowed(job_id):
                         # Record dropped by this run; nothing left to keep fresh.
+                        continue
+                    reason, detail = _classify_miss()
+                    logger.warning(
+                        "Job '%s': fire claim heartbeat missed (reason=%s%s%s)",
+                        job_id, reason, ": " if detail else "", detail)
+                    if reason == FIRE_CLAIM_READOPTED:
+                        last_confirmed = time.monotonic()
                         continue
                     # One miss is a sample, not a verdict (#113357): a latch cancels the live
                     # agent run and ends the lease refresh, so confirm before acting on it.
@@ -2667,22 +2774,39 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
                             job_id, expected_owner=owner):
                         last_confirmed = time.monotonic()
                         continue
-                    lost_ownership.set()
+                    reason, detail = _classify_miss()
+                    if reason == FIRE_CLAIM_READOPTED:
+                        last_confirmed = time.monotonic()
+                        continue
+                    if reason == FIRE_CLAIM_OK:
+                        reason = "sampled_miss"     # the store validated on re-read; the samples did not
+                    lost_ownership.latch(reason, detail)
                     logger.warning(
-                        "Job '%s': fire claim ownership lost; interrupting stale run",
-                        job_id)
+                        "Job '%s': fire claim ownership lost (reason=%s%s%s); %s",
+                        job_id, reason, ": " if detail else "", detail,
+                        "stopping at the next tool boundary" if lost_ownership.graceful
+                        else "interrupting stale run")
                     return
                 last_confirmed = time.monotonic()
-            except Exception:
+                failing_since_logged = False
+            except Exception as error:
+                if not failing_since_logged:
+                    failing_since_logged = True
+                    logger.warning(
+                        "Job '%s': fire_claim heartbeat could not write the job store (%s); "
+                        "retrying within %.1fs grace", job_id, type(error).__name__,
+                        _FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS)
                 logger.debug("Job '%s': fire_claim heartbeat failed", job_id, exc_info=True)
                 if (
                     time.monotonic() - last_confirmed
                     >= _FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS
                 ):
-                    lost_ownership.set()
+                    lost_ownership.latch(
+                        "stale_timestamp",
+                        f"claim not renewed for {time.monotonic() - last_confirmed:.1f}s ({type(error).__name__})")
                     logger.warning(
-                        "Job '%s': fire_claim could not be renewed within %.1fs; "
-                        "interrupting uncertain run",
+                        "Job '%s': fire claim ownership lost (reason=stale_timestamp): fire_claim "
+                        "could not be renewed within %.1fs; interrupting uncertain run",
                         job_id,
                         _FIRE_CLAIM_HEARTBEAT_GRACE_SECONDS)
                     return

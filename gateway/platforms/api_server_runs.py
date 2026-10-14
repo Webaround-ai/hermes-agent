@@ -391,9 +391,57 @@ def _run_idempotency_scope(self, request: "web.Request", *, _api_server) -> str:
             "room_id", "home_install_id", "authority_gateway_id", "authority_epoch",
             "member_id", "target_install_id", "target_profile"))
     else:
-        parts = (_api_server._api_request_profile.get() or "default",
-                 self._expected_api_key() or "unauthenticated-test-listener")
+        return _api_key_scope(self, _api_server=_api_server)
     return hashlib.sha256("\0".join(map(str, parts)).encode()).hexdigest()
+
+
+def _api_key_scope(self, *, _api_server) -> str:
+    """The run-owner scope of a plain API-key request for the current (URL-selected) profile."""
+    parts = (_api_server._api_request_profile.get() or "default",
+             self._expected_api_key() or "unauthenticated-test-listener")
+    return hashlib.sha256("\0".join(map(str, parts)).encode()).hexdigest()
+
+
+class _CronRunHandle:
+    """What ``_make_approval_notify`` reads from a run, for a cron run (no /v1/runs launch)."""
+
+    def __init__(self, run_id: str, queue: "asyncio.Queue") -> None:
+        self.run_id, self.queue = run_id, queue
+
+
+_CRON_BRIDGE_CALL_TIMEOUT_SECONDS = 10.0
+
+
+def _open_cron_run_bridge(self, run_id: str, *, _api_server):
+    """Open a cron run's approval round trip on this adapter (called on the cron run's thread).
+
+    The run is registered under ``run_id`` (the cron session id) for the API-key owner of an
+    unprefixed request, exactly like a /v1/runs run: an approval parks it ``waiting_for_approval``
+    through ``_make_approval_notify`` and ``POST /v1/runs/{run_id}/approval`` resolves it. Returns
+    ``close()``, which unregisters the bridge (waking any wait) and forgets the run."""
+    loop = getattr(self, "_cron_bridge_loop", None)
+    if loop is None or loop.is_closed():
+        return None
+    from tools.approval import register_gateway_notify, unregister_gateway_notify
+
+    async def _register():
+        self._run_owners[run_id] = _api_key_scope(self, _api_server=_api_server)
+        self._run_approval_sessions[run_id] = run_id
+        self._set_run_status(run_id, "running", session_id=run_id, source="cron")
+        return _make_approval_notify(self, _CronRunHandle(run_id, asyncio.Queue()), _api_server=_api_server)
+
+    notify = asyncio.run_coroutine_threadsafe(_register(), loop).result(_CRON_BRIDGE_CALL_TIMEOUT_SECONDS)
+    register_gateway_notify(run_id, notify)
+
+    async def _retire():
+        _forget_run(self, run_id, self._run_approval_sessions, self._run_statuses)
+
+    def close() -> None:
+        unregister_gateway_notify(run_id)
+        if not loop.is_closed():
+            asyncio.run_coroutine_threadsafe(_retire(), loop).result(_CRON_BRIDGE_CALL_TIMEOUT_SECONDS)
+
+    return close
 
 
 def _check_run_auth(self, request: "web.Request", *, permission: str, _api_server) -> "web.Response | None":

@@ -1552,6 +1552,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     try:
         batch.run()
     finally:
+        # Between tools again (the sequential path clears it per call): a caller waiting for a
+        # tool boundary (cron's deleted-record stop) must not see a finished batch as running.
+        agent._current_tool = None
         if spinner:
             finished = [r for r in batch.results if r is not None]
             spinner.stop(f"⚡ {len(finished)}/{num_tools} tools completed in {sum(r.duration for r in finished):.1f}s total")

@@ -126,6 +126,44 @@ def register_gateway_notify(session_key: str, cb) -> None:
         _gateway_notify_cbs[session_key] = cb
 
 
+# Cron run approval bridge. A cron run is not a /v1/runs run, yet an owner-facing approval must reach the
+# owner the same way: the api_server adapter (when this gateway serves one) registers a provider that,
+# for each cron run, opens the live-run approval round trip under run id = the cron session id —
+# ``register_gateway_notify`` with the adapter's own ``_make_approval_notify`` (status
+# ``waiting_for_approval``, ``approval.request`` event) and ``POST /v1/runs/{run_id}/approval`` to resolve.
+_cron_run_bridge_provider = None  # callable(run_id) -> close() | None
+
+
+def set_cron_run_bridge_provider(provider) -> None:
+    """Install the provider that opens a cron run's approval bridge (``provider(run_id)`` returns a
+    ``close()`` callable, or None when it cannot serve the run)."""
+    global _cron_run_bridge_provider
+    with _lock:
+        _cron_run_bridge_provider = provider
+
+
+def clear_cron_run_bridge_provider(provider) -> None:
+    """Remove *provider* if it is still the installed one (a newer adapter may have replaced it)."""
+    global _cron_run_bridge_provider
+    with _lock:
+        if _cron_run_bridge_provider == provider:
+            _cron_run_bridge_provider = None
+
+
+def open_cron_run_bridge(run_id: str):
+    """Open the approval bridge for one cron run; ``close()`` or None (no provider, or it failed:
+    the run then keeps the historical cron resolution — owner-required approvals block)."""
+    with _lock:
+        provider = _cron_run_bridge_provider
+    if provider is None or not run_id:
+        return None
+    try:
+        return provider(run_id)
+    except Exception:
+        logger.error("Cron run %s: approval bridge could not be opened", run_id, exc_info=True)
+        return None
+
+
 def unregister_gateway_notify(session_key: str) -> None:
     """Unregister the callback and wake ALL blocked threads for this session so
     they don't hang forever (agent run finished or interrupted)."""
@@ -958,7 +996,7 @@ def _run_approval_gate(
     advice: str = "Find an alternative approach that avoids this action.",
     cron_deny_message: str = "", single_query_deny_message: str = "", unattended_deny_message: str = "",
     autoapprove_log_prefix: str, fail_closed_when_no_human: bool = False, no_human_block_message: str = "",
-    require_human: bool = False,
+    require_human: bool = False, cron_bridge: bool = False,
 ) -> dict:
     """Shared human-approval gate for a flagged action (tool call or write): decision core for
     :func:`request_tool_approval` and the file-tool write gates.
@@ -982,6 +1020,11 @@ def _run_approval_gate(
         return _approved()
 
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
+    if (cron_bridge and not (is_cli or is_gateway or is_ask) and _is_cron_approval_context()
+            and not _is_single_query_approval_context() and _gateway_notify_cb(session_key) is not None):
+        # A cron run whose approval bridge is open (open_cron_run_bridge) HAS a human: ask through
+        # it exactly as a live /v1/runs run does. No bridge → the historical cron resolution below.
+        is_ask = True
     if require_human and not (is_cli or is_gateway or is_ask):
         return _blocked(no_human_block_message or (
             f"BLOCKED: {subject or description} requires a live owner approval, but no approval bridge is available."),
@@ -1131,7 +1174,7 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
         fail_closed_when_no_human=True,
         no_human_block_message=(f"BLOCKED: {subject} but no interactive user or gateway is present "
                                 "to approve it. A plugin flagged this action for human confirmation."),
-        require_human=require_human,
+        require_human=require_human, cron_bridge=True,
     )
 
 

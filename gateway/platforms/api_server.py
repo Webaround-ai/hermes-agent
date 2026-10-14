@@ -4253,6 +4253,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
         return _api_runs._request_owns_run(self, request, run_id)
 
+    def _open_cron_run_bridge(self, run_id: str):
+        return _api_runs._open_cron_run_bridge(self, run_id, _api_server=sys.modules[__name__])
+
     def _release_run_owner_if_forgotten(self, run_id: str) -> None:
         _api_runs._release_run_owner_if_forgotten(self, run_id)
 
@@ -4413,6 +4416,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 return False
             from gateway.platforms.shared_ingress import listener_base_url
             self._mark_connected(listener_base=listener_base_url(self._host, self._port))
+            # Cron runs in this process ask their owner through this adapter's run approvals.
+            self._cron_bridge_loop = asyncio.get_running_loop()
+            from tools.approval import set_cron_run_bridge_provider
+            set_cron_run_bridge_provider(self._open_cron_run_bridge)
             logger.info(
                 "[%s] API server listening on http://%s:%d (model: %s)",
                 self.name, self._host, self._port, self._model_name)
@@ -4432,6 +4439,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         files, #37011).
         """
         self._mark_disconnected()
+        with suppress(Exception):
+            from tools.approval import clear_cron_run_bridge_provider
+            clear_cron_run_bridge_provider(self._open_cron_run_bridge)
         # getattr: disconnect() tolerates bare __new__ fixtures (pinned in test_api_server_run_idempotency).
         routed = getattr(self, "_response_stores", {})
         stores = [s for s in (getattr(self, "_response_store", None), *list(routed.values())) if s is not None]

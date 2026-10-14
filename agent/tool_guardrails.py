@@ -256,7 +256,7 @@ _DECISION_MESSAGES: dict[str, str] = {
     ),
     "repeated_exact_failure_warning": (
         "{tool_name} has failed {count} times with identical arguments. This looks like a loop; "
-        "inspect the error and change strategy instead of retrying it unchanged."
+        "inspect the error, then change the arguments or call a different tool instead of retrying it unchanged."
     ),
     "idempotent_no_progress_warning": (
         "{tool_name} returned the same result {count} times. Use the result already provided "

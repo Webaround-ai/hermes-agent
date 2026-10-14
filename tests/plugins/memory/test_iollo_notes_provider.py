@@ -164,7 +164,7 @@ def test_no_decide_url_means_no_network_and_fused_order(home):
 def test_search_and_read_tools(home):
     provider = make(home)
     names = [s["name"] for s in provider.get_tool_schemas()]
-    assert names == ["memory_search", "memory_read", "memory_note"]
+    assert names == ["memory_search", "memory_read", "memory_note", "recall"]
     found = json.loads(provider.handle_tool_call("memory_search", {"query": "what did I say about Ana?"}))
     assert found["results"][0]["id"] == "people/ana-costa"
     read = json.loads(provider.handle_tool_call("memory_read", {"id": "people/ana-costa"}))

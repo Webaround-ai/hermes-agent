@@ -97,7 +97,10 @@ class Stub:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 stub.requests.append(("POST", self.path, body, dict(self.headers)))
                 if self.path == "/recall/search":
-                    self._answer(stub.catalogue)
+                    if stub.catalogue is None:               # a sync service without the catalogue route yet
+                        self._answer({"detail": "Not Found"}, status=404)
+                    else:
+                        self._answer(stub.catalogue)
                 else:
                     self._answer(stub.mac_answer)
 
@@ -203,4 +206,15 @@ def test_recall_without_a_box_service_still_answers(tmp_path, monkeypatch):
     p.initialize("sess-fake", hermes_home=str(tmp_path), platform="cli")
     out = json.loads(p.handle_tool_call("recall", {"query": "porto lease"}))
     assert out["hits"] == [] and out["catalogue"] == "no catalogue on this device" and out["mac"] == "not_connected"
+    assert out["note"].startswith("iollo cannot search the owner's Mac right now")
     p.shutdown()
+
+
+def test_recall_degrades_when_the_box_has_no_catalogue_yet_and_the_relay_is_down(provider, stub, monkeypatch):
+    stub.catalogue = None                                     # the sync service answers 404 for /recall/search
+    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
+    assert "error" not in out and out["catalogue"] == "catalogue unavailable" and out["mac"] == "not_connected"
+    assert out["hits"] == [] and out["note"].startswith("iollo cannot search the owner's Mac right now")
+    monkeypatch.setenv("RELAY_URL", "http://127.0.0.1:9")    # nothing listens: the control plane is unreachable
+    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
+    assert out["mac"] == "unreachable" and out["hits"] == [] and "error" not in out

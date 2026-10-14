@@ -610,6 +610,9 @@ class IolloNotesProvider(MemoryProvider):
             out["still_reading"] = True
             out["note"] = ("iollo is still reading the owner's Mac: if this is not what they meant, say "
                            "\"I'm still reading your Mac\" rather than that it does not exist.")
+        elif not hits and catalogue.get("error") and mac["state"] not in ("searched", "indexing"):
+            out["note"] = ("iollo cannot search the owner's Mac right now (no catalogue yet and the Mac is not "
+                           "reachable): say that, rather than that it does not exist.")
         elif not hits:
             out["note"] = "Nothing found on the owner's Macs for that."
         return tool_result(out)

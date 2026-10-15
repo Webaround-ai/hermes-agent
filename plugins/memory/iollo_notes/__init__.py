@@ -4,17 +4,18 @@ Many small typed Markdown notes in ``$HERMES_HOME/memory-notes`` (the synced git
 generated profile ``USER.md`` injected whole into the system prompt, and everything else found
 on demand by a local index (``index.py``). Memory never leaves the device: the network calls are
 the Jev decision URL the policy configures (``decide_url``), where every decision has a local
-fallback, and ``recall``'s two searches below (the box's own sync service, and the owner's Mac
-through the control plane), which send the query, never notes. Consolidation and USER.md generation run on the box (iollo brief 032), not here.
+fallback, and ``recall``'s search of the owner's Mac through the control plane, which sends the query,
+never notes. Consolidation and USER.md generation run on the box (iollo brief 032), not here.
 
 Activate with ``memory.provider: iollo_notes``. Settings live under ``memory.iollo_notes`` in
 config.yaml: ``decide_url``, ``decide_token_env``, ``decide_timeout_s`` (1.5), ``device``
-(``box`` or ``mac:<id>``), ``recall_url`` (optional; default ``/recall/search`` beside ``decide_url``).
+(``box`` or ``mac:<id>``).
 
-``recall`` (iollo docs/MAC-RECALL-AND-MEMORY-DESIGN.md section 6) finds things on the owner's Macs: it searches
-the box's recall catalogue through the box sync service (``/recall/search`` beside ``decide_url``, same token),
-and, when the owner's Mac is connected with recall on, also the Mac's own index (``recall_local`` through the
-control plane's ``/relay/device-tool``, the route ``mac_call`` uses), Mac hits first.
+``recall`` finds things on the owner's Mac. The Mac is a tool: recall asks the connected Mac's own index
+(``recall_local`` through the control plane's ``/relay/device-tool``, the route ``mac_call`` uses) and nothing
+else. The box keeps no copy of the Mac's index (iollo owner decision 2026-10-15; the box embeds only its own
+notes). When the Mac is not connected, has recall off or does not answer, recall says so plainly instead of
+answering with an empty list.
 """
 
 from __future__ import annotations
@@ -51,12 +52,20 @@ ROUTE_CANDIDATES = 50
 ROUTE_MIN_SCORE = 0.9
 STATE_CHARS = 4000
 DEFAULT_TIMEOUT_S = 1.5
-RECALL_PATH = "/recall/search"           # the box sync service, beside decide_url
 RECALL_TIMEOUT_S = 10.0
 RECALL_MAC_DEADLINE_S = 20               # how long recall waits for the Mac's own index
 RECALL_DEFAULT_LIMIT, RECALL_MAX_LIMIT = 10, 20
 DEFAULT_RELAY_URL = "http://instinct-control.internal:8080"
 MAC_RECALL_TOOL = "mac_recall_local"
+# What recall answers when it cannot search the Mac: the reason, said plainly, never an empty result.
+MAC_UNAVAILABLE = {
+    "not_connected": "The owner's Mac is not connected, so recall cannot search it now. Say that, rather than that "
+                     "it does not exist; it works again once the Mac is awake with iollo running.",
+    "recall_off": "Recall is off on the owner's Mac, so it cannot be searched. Say that; the owner can turn it on "
+                  "in the iollo menu bar app.",
+    "unreachable": "The owner's Mac did not answer, so recall could not search it. Say that, rather than that it "
+                   "does not exist.",
+}
 NO_PROFILE_LINE = "USER PROFILE: no profile yet."
 _PROFILE_SEP = "═" * 46
 _AUTO = object()
@@ -118,10 +127,10 @@ RECALL_SCHEMA = {
     "name": "recall",
     "description": (
         "Find something on the owner's Mac by what it is about: a document, a PDF page, a screenshot, an email, a "
-        "message, a note, an event, a visited page. Searches what iollo knows the Mac holds (works while the Mac "
-        "sleeps) and, when the Mac is connected, the Mac's own index. Answers where each hit is (folder and page, "
-        "who sent it and when); fetch the thing itself with mac_call (file_send, mail_read, notes_read). Use it "
-        "before saying you cannot find something of the owner's."
+        "message, a note, an event, a visited page. Searches the connected Mac's own index; when the Mac is "
+        "not connected or does not answer, it says so. Answers where each hit is (folder and page, who sent it "
+        "and when); fetch the thing itself with mac_call (file_send, mail_read, notes_read). Use it before saying "
+        "you cannot find something of the owner's."
     ),
     "parameters": {
         "type": "object",
@@ -494,35 +503,7 @@ class IolloNotesProvider(MemoryProvider):
             about=args.get("about") or None, valid_until=args.get("valid_until") or None,
         ))
 
-    # -- recall (the Mac catalogue in the box and the Mac's own index) ----------------------------
-
-    def _recall_url(self) -> str:
-        """The box sync service's catalogue search: ``recall_url``, else beside ``decide_url`` (same service)."""
-        url = str(self._config.get("recall_url") or "").strip()
-        if url:
-            return url
-        decide = str(self._config.get("decide_url") or "").strip()
-        if not decide:
-            return ""
-        parts = urllib.parse.urlsplit(decide)
-        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, RECALL_PATH, "", ""))
-
-    def _token_headers(self) -> Dict[str, str]:
-        token_env = str(self._config.get("decide_token_env") or "").strip()
-        token = os.environ.get(token_env, "") if token_env else ""
-        return {"Authorization": f"Bearer {token}"} if token else {}
-
-    def _catalogue_search(self, query: str, sources: List[str], since: Optional[str], limit: int) -> Dict[str, Any]:
-        url = self._recall_url()
-        if not url:
-            return {"hits": [], "error": "no catalogue on this device"}
-        try:
-            answer = _post_json(url, {"query": query, "sources": sources, "since": since, "limit": limit},
-                                self._token_headers(), RECALL_TIMEOUT_S)
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            logger.warning("iollo_notes recall catalogue unavailable: %s", type(exc).__name__)
-            return {"hits": [], "error": "catalogue unavailable"}
-        return answer if isinstance(answer, dict) else {"hits": []}
+    # -- recall (the Mac's own index; the Mac is a tool) -----------------------------------------
 
     def _mac_search(self, query: str, sources: List[str], since: Optional[str], limit: int) -> Dict[str, Any]:
         """The connected Mac's own index through the control plane (the route mac_call uses). ``state``: searched,
@@ -576,12 +557,13 @@ class IolloNotesProvider(MemoryProvider):
             limit = max(1, min(int(args.get("limit") or RECALL_DEFAULT_LIMIT), RECALL_MAX_LIMIT))
         except (TypeError, ValueError):
             limit = RECALL_DEFAULT_LIMIT
-        catalogue = self._catalogue_search(query, sources, since, limit)
         mac = self._mac_search(query, sources, since, limit)
+        if mac["state"] not in ("searched", "indexing"):
+            return tool_error(MAC_UNAVAILABLE.get(mac["state"], MAC_UNAVAILABLE["unreachable"]), mac=mac["state"])
         hits: List[Dict[str, Any]] = []
         seen = set()
-        for hit in mac["hits"]:                       # the Mac's own index first: it has read the content itself
-            key = (mac.get("device_id"), hit.get("ref"))
+        for hit in mac["hits"]:
+            key = hit.get("ref")
             if key in seen:
                 continue
             seen.add(key)
@@ -589,32 +571,17 @@ class IolloNotesProvider(MemoryProvider):
                          **{k: hit[k] for k in ("source", "kind", "ref", "title", "when", "people", "excerpt", "loc",
                                                 "loc_end") if hit.get(k) not in (None, "", [])},
                          "device_id": mac.get("device_id")})
-        for hit in catalogue.get("hits") or []:
-            if not isinstance(hit, dict) or (hit.get("device_id"), hit.get("ref")) in seen:
-                continue
-            seen.add((hit.get("device_id"), hit.get("ref")))
-            hits.append({"from": "catalogue", "where": where_it_is(hit),
-                         **{k: hit[k] for k in ("source", "kind", "ref", "title", "when", "people", "excerpt",
-                                                "device_id") if hit.get(k) not in (None, "", [])}})
         hits = hits[:limit]
         indexed, total = mac.get("indexed"), mac.get("total")
-        still_reading = any(isinstance(d, dict) and d.get("still_reading") for d in catalogue.get("devices") or [])
-        if isinstance(indexed, int) and isinstance(total, int):
-            still_reading = still_reading or indexed < total
         out: Dict[str, Any] = {"hits": hits, "count": len(hits), "mac": mac["state"]}
         if isinstance(indexed, int) and isinstance(total, int):
             out.update(indexed=indexed, total=total)
-        if catalogue.get("error"):
-            out["catalogue"] = catalogue["error"]
-        if still_reading:
+        if mac["state"] == "indexing" or (isinstance(indexed, int) and isinstance(total, int) and indexed < total):
             out["still_reading"] = True
             out["note"] = ("iollo is still reading the owner's Mac: if this is not what they meant, say "
                            "\"I'm still reading your Mac\" rather than that it does not exist.")
-        elif not hits and catalogue.get("error") and mac["state"] not in ("searched", "indexing"):
-            out["note"] = ("iollo cannot search the owner's Mac right now (no catalogue yet and the Mac is not "
-                           "reachable): say that, rather than that it does not exist.")
         elif not hits:
-            out["note"] = "Nothing found on the owner's Macs for that."
+            out["note"] = "Nothing found on the owner's Mac for that."
         return tool_result(out)
 
     # -- writing ---------------------------------------------------------------------------------

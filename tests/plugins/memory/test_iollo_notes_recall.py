@@ -1,5 +1,6 @@
 """iollo_notes recall (iollo docs/MAC-RECALL-AND-MEMORY-DESIGN.md sections 6 and 7): the two new note types, the
-people relation bullet, catalogue provenance, and the ``recall`` tool against stub box and control-plane servers.
+people relation bullet, catalogue provenance, and the ``recall`` tool against a stub control plane (the Mac is
+the only place recall searches; iollo owner decision 2026-10-15).
 Every name, ref and token here is fake."""
 
 import json
@@ -73,11 +74,10 @@ def test_where_it_is_reads_like_a_place():
 # -- the recall tool -----------------------------------------------------------------------------
 
 class Stub:
-    """One HTTP server playing the box sync service (/recall/search) and the control plane (/relay/device-tool)."""
+    """One HTTP server playing the control plane (/relay/device-tool); anything else it records and answers 404."""
 
     def __init__(self):
         self.requests, self.listing, self.mac_answer = [], {"connected": False, "linked": True}, None
-        self.catalogue = {"hits": [], "devices": []}
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -96,13 +96,10 @@ class Stub:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 stub.requests.append(("POST", self.path, body, dict(self.headers)))
-                if self.path == "/recall/search":
-                    if stub.catalogue is None:               # a sync service without the catalogue route yet
-                        self._answer({"detail": "Not Found"}, status=404)
-                    else:
-                        self._answer(stub.catalogue)
-                else:
+                if self.path == "/relay/device-tool":
                     self._answer(stub.mac_answer)
+                else:
+                    self._answer({"detail": "Not Found"}, status=404)
 
             def log_message(self, *args):
                 pass
@@ -136,9 +133,12 @@ def provider(tmp_path, stub):
     p.shutdown()
 
 
-CATALOGUE_HIT = {"device_id": "dev_fake_mac", "ref": "Documents/Housing/porto-lease.pdf", "source": "files",
-                 "kind": "pdf", "title": "Porto lease", "when": "2026-09-01T00:00:00Z", "people": ["Fake Landlord"],
-                 "excerpt": "Rent due on the first.", "score": 1.0}
+MAC_HIT = {"ref": "Documents/Housing/porto-lease.pdf", "source": "files", "kind": "pdf", "title": "Porto lease",
+           "when": "2026-09-01T00:00:00Z", "people": ["Fake Landlord"], "excerpt": "Rent due on the first.",
+           "score": 1.0}
+MAC_LISTING = {"connected": True, "device": {"id": "dev_fake_mac", "name": "Fake Mac"},
+               "tools": [{"name": "mac_recall_local"}], "recall": {"enabled": True, "items": 10, "indexed": 10,
+                                                                    "last_pass_at": None}}
 
 
 def test_recall_is_a_tool_of_the_provider(provider):
@@ -146,75 +146,62 @@ def test_recall_is_a_tool_of_the_provider(provider):
     assert "recall" in names and "memory_search" in names
 
 
-def test_recall_searches_the_catalogue_when_the_mac_is_away(provider, stub):
-    stub.catalogue = {"hits": [CATALOGUE_HIT], "devices": [{"device_id": "dev_fake_mac", "items": 9,
-                                                            "still_reading": False, "last_pass": None}]}
+def test_recall_asks_only_the_connected_mac(provider, stub):
+    stub.listing = {**MAC_LISTING, "recall": {"enabled": True, "items": 10, "indexed": 4, "last_pass_at": None}}
+    stub.mac_answer = {"state": "done", "output": "2 hits", "error": None, "data": {
+        "hits": [{**MAC_HIT, "loc": 3, "item": 7}, {"source": "messages", "kind": "message", "ref": "msg:1",
+                                                    "people": ["Fake Landlord"], "when": "2026-10-10T09:00:00Z",
+                                                    "excerpt": "The keys are with me."},
+                 {**MAC_HIT, "loc": 4}],
+        "indexed": 4, "total": 10}}
     out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease", "sources": ["files"],
                                                           "since": "2026-01-01", "limit": 50}))
-    assert out["mac"] == "not_connected" and out["count"] == 1
-    hit = out["hits"][0]
-    assert hit["from"] == "catalogue" and hit["where"] == "Documents/Housing, porto-lease.pdf"
-    search = next(r for r in stub.requests if r[1] == "/recall/search")
-    assert search[2] == {"query": "porto lease", "sources": ["files"], "since": "2026-01-01", "limit": 20}
-    assert search[3]["Authorization"] == "Bearer fake-sync-key"
-    assert not [r for r in stub.requests if r[0] == "POST" and r[1] == "/relay/device-tool"]
-
-
-def test_recall_asks_the_connected_mac_and_puts_its_hits_first(provider, stub):
-    stub.catalogue = {"hits": [CATALOGUE_HIT, {**CATALOGUE_HIT, "ref": "Documents/old.pdf", "title": "Old"}],
-                      "devices": []}
-    stub.listing = {"connected": True, "device": {"id": "dev_fake_mac", "name": "Fake Mac"},
-                    "tools": [{"name": "mac_recall_local"}], "recall": {"enabled": True, "items": 10, "indexed": 4,
-                                                                         "last_pass_at": None}}
-    stub.mac_answer = {"state": "done", "output": "2 hits", "error": None, "data": {
-        "hits": [{**CATALOGUE_HIT, "loc": 3, "item": 7}, {"source": "messages", "kind": "message", "ref": "msg:1",
-                                                          "people": ["Fake Landlord"], "when": "2026-10-10T09:00:00Z",
-                                                          "excerpt": "The keys are with me."}],
-        "indexed": 4, "total": 10}}
-    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
-    assert out["mac"] == "searched" and [h["from"] for h in out["hits"]] == ["mac", "mac", "catalogue"]
+    assert out["mac"] == "searched" and [h["from"] for h in out["hits"]] == ["mac", "mac"]   # one hit per item
     assert out["hits"][0]["where"] == "Documents/Housing, porto-lease.pdf, page 3"
     assert out["hits"][1]["where"] == "message from Fake Landlord on 2026-10-10"
-    assert out["hits"][2]["ref"] == "Documents/old.pdf"                  # the duplicate of a Mac hit is dropped
     assert out["still_reading"] is True and "still reading your Mac" in out["note"]
     call = next(r for r in stub.requests if r[0] == "POST" and r[1] == "/relay/device-tool")
-    assert call[2] == {"tool": "mac_recall_local", "args": {"query": "porto lease", "limit": 10},
+    assert call[2] == {"tool": "mac_recall_local", "args": {"query": "porto lease", "limit": 20, "sources": ["files"],
+                                                             "since": "2026-01-01"},
                        "deadline_s": 20, "device_id": "dev_fake_mac"}
     assert call[3]["X-Relay-Token"] == "fake-relay-token"
+    assert [r[1] for r in stub.requests] == ["/relay/device-tool", "/relay/device-tool"]   # no box catalogue search
 
 
-def test_recall_skips_a_mac_without_recall_and_says_when_nothing_is_found(provider, stub):
-    stub.listing = {"connected": True, "device": {"id": "dev_fake_mac"}, "tools": [{"name": "mac_recall_local"}],
-                    "recall": {"enabled": False, "items": 0, "indexed": 0}}
+def test_recall_says_nothing_found_only_after_the_mac_searched(provider, stub):
+    stub.listing = MAC_LISTING
+    stub.mac_answer = {"state": "done", "output": "", "error": None, "data": {"hits": [], "indexed": 10, "total": 10}}
     out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
-    assert out["mac"] == "recall_off" and out["hits"] == [] and out["note"].startswith("Nothing found")
-    stub.listing = {**stub.listing, "recall": {"enabled": True, "items": 5, "indexed": 0}}
-    stub.mac_answer = {"state": "failed", "output": "", "data": {"hits": [CATALOGUE_HIT], "indexed": 0, "total": 5},
+    assert out["mac"] == "searched" and out["hits"] == [] and out["note"].startswith("Nothing found")
+    stub.listing = {**MAC_LISTING, "recall": {"enabled": True, "items": 5, "indexed": 0}}
+    stub.mac_answer = {"state": "failed", "output": "", "data": {"hits": [MAC_HIT], "indexed": 0, "total": 5},
                        "error": {"code": "indexing", "message": "first pass", "retryable": True}}
     out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
     assert out["mac"] == "indexing" and out["hits"][0]["from"] == "mac" and out["still_reading"] is True
-    stub.mac_answer = {"state": "failed", "output": "", "data": {},
-                       "error": {"code": "mac_unreachable", "message": "asleep", "retryable": True}}
-    assert json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))["mac"] == "unreachable"
     assert "error" in json.loads(provider.handle_tool_call("recall", {"query": "  "}))
 
 
-def test_recall_without_a_box_service_still_answers(tmp_path, monkeypatch):
+def test_recall_says_plainly_when_the_mac_cannot_be_searched(provider, stub, monkeypatch):
+    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))          # not connected
+    assert out == {"error": out["error"], "mac": "not_connected"} and "not connected" in out["error"]
+    stub.listing = {**MAC_LISTING, "recall": {"enabled": False, "items": 0, "indexed": 0}}
+    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
+    assert out["mac"] == "recall_off" and "Recall is off" in out["error"] and "hits" not in out
+    stub.listing = MAC_LISTING
+    stub.mac_answer = {"state": "failed", "output": "", "data": {},
+                       "error": {"code": "mac_unreachable", "message": "asleep", "retryable": True}}
+    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
+    assert out["mac"] == "unreachable" and "did not answer" in out["error"] and "hits" not in out
+    monkeypatch.setenv("RELAY_URL", "http://127.0.0.1:9")    # nothing listens: the control plane is unreachable
+    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
+    assert out["mac"] == "unreachable" and "hits" not in out
+
+
+def test_recall_without_a_relay_token_says_the_mac_is_not_connected(tmp_path, monkeypatch):
     monkeypatch.delenv("RELAY_TOKEN", raising=False)
     write_fixture(tmp_path / "memory-notes")
     p = IolloNotesProvider({"decide_url": "", "device": "box"}, embedder=None)
     p.initialize("sess-fake", hermes_home=str(tmp_path), platform="cli")
     out = json.loads(p.handle_tool_call("recall", {"query": "porto lease"}))
-    assert out["hits"] == [] and out["catalogue"] == "no catalogue on this device" and out["mac"] == "not_connected"
-    assert out["note"].startswith("iollo cannot search the owner's Mac right now")
+    assert out["mac"] == "not_connected" and "hits" not in out and "error" in out
     p.shutdown()
-
-
-def test_recall_degrades_when_the_box_has_no_catalogue_yet_and_the_relay_is_down(provider, stub, monkeypatch):
-    stub.catalogue = None                                     # the sync service answers 404 for /recall/search
-    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
-    assert "error" not in out and out["catalogue"] == "catalogue unavailable" and out["mac"] == "not_connected"
-    assert out["hits"] == [] and out["note"].startswith("iollo cannot search the owner's Mac right now")
-    monkeypatch.setenv("RELAY_URL", "http://127.0.0.1:9")    # nothing listens: the control plane is unreachable
-    out = json.loads(provider.handle_tool_call("recall", {"query": "porto lease"}))
-    assert out["mac"] == "unreachable" and out["hits"] == [] and "error" not in out
